@@ -55,12 +55,6 @@ CapTouch touchscreen;
 #include <XPT2046_Touchscreen.h>
 #endif
 #include <Preferences.h>
-#if defined(S3_CYD)
-#include <SD_MMC.h>   // this board's microSD is wired in native SDIO mode
-#define SD SD_MMC     // the game code talks to the card through `SD.`
-#else
-#include <SD.h>
-#endif
 // TFT_eSPI's SMOOTH_FONT support defines FS_NO_GLOBALS, which suppresses the
 // global `File` alias when FS.h is (re)included by the SD library below.
 #if defined(FS_NO_GLOBALS)
@@ -127,7 +121,6 @@ SPIClass touchscreenSPI = SPIClass(VSPI);
 XPT2046_Touchscreen touchscreen(TOUCH_CS, TOUCH_IRQ);
 #endif
 Preferences preferences;
-bool sdMounted = false;
 
 const int SCREEN_W = 320;
 const int SCREEN_H = 240;
@@ -136,22 +129,13 @@ const int SCREEN_H = 240;
 // vertically. Touch hitboxes stay in game space and never change.
 const int PANEL_W = 480;
 const int PANEL_H = 320;
-const int ART_W = 178;
+const int ART_W = 178;   // garden art band width (layout + touch hitbox)
 const int ART_H = 144;
-uint8_t bmpRow[ART_W * 3 + 4];
-uint16_t rgbRow[320];
-uint16_t scaledPlantRow[PANEL_W];
-uint16_t panelRow[PANEL_W];  // panel-resolution row for scaled BMP blits
 unsigned long deathLedUntil = 0;  // red LED stays lit briefly after a kill
 
 // Settings pages: scroll offset for the big-button list, and drag-gesture state.
 int16_t settingsScroll = 0;
 uint8_t characterSelectIndex = 0;  // grower shown on the giant select card
-// SD file installer (serial-triggered tool): lets a host push BMP files to
-// the card without removing it. Send "SDINSTALL\n" at 115200 to enter.
-bool sdInstallerMode = false;
-char installerBuf[16];
-uint8_t installerLen = 0;
 
 
 // Growth stage currently shown on screen; tick refreshes only redraw stats
@@ -256,6 +240,7 @@ uint8_t smokeProductUsed = 0;
 uint8_t pestType = 0;
 uint8_t pestSeverity = 0;
 bool plantActive = true;
+uint16_t plantVariant = 1;   // per-grow look seed, rolled fresh at each new planting
 bool firstPlantingDone = true;
 uint8_t plantedPotMask = 0;
 bool seedDragging = false;
@@ -308,7 +293,7 @@ uint8_t dryStreakTicks = 0;         // consecutive ticks the plant has been <20%
 bool plantDeathAnimationRequested = false;
 bool pestAnimationRequested = false;
 
-const char DEVICE_BRAND[] = "WinFlorida";
+const char DEVICE_BRAND[] = "Win Florida";
 const uint16_t NEARBY_MAGIC = 0xC47A;
 const uint8_t PACKET_HELLO = 1;
 const uint8_t PACKET_MESSAGE = 2;
@@ -412,7 +397,7 @@ void drawGardenActions();
 void waitForCutsceneContinue();
 
 // Firmware identity, shown in the boot log and on the Options page.
-#define FW_VERSION "v40"
+#define FW_VERSION "v41"
 #define FW_BOARD    "S3"
 #define FW_DATE    "Nov 20"
 #define FW_VERSION_FULL FW_VERSION "-" FW_BOARD
@@ -694,8 +679,9 @@ static void audioInit() {
 // stream is active; when the chant ends the theme takes over and loops.
 #include "boot_chant.h"
 #include "theme_loop.h"
+#include "bong_hit.h"
 
-static const uint8_t PCM_NONE = 0, PCM_CHANT = 1, PCM_THEME = 2;
+static const uint8_t PCM_NONE = 0, PCM_CHANT = 1, PCM_BONG = 2, PCM_THEME = 3;
 static uint8_t pcmStream = PCM_NONE;
 static uint32_t pcmPos = 0;
 static int32_t pcmPredict = 0;
@@ -728,9 +714,17 @@ void playBootChant() {
 static inline int32_t pcmNextSample() {
   for (;;) {
     const uint32_t frames =
-        pcmStream == PCM_CHANT ? bootChantFrames : themeFrames;
+        pcmStream == PCM_CHANT ? bootChantFrames
+        : pcmStream == PCM_BONG ? bongHitFrames : themeFrames;
     if (pcmPos < frames) break;
     if (pcmStream == PCM_CHANT) {
+      // Crowd chant, then the bong hit lands, then the theme drops.
+      if (bongHitFrames) { pcmStart(PCM_BONG); continue; }
+      if (themeFrames) { pcmStart(PCM_THEME); continue; }
+      pcmStream = PCM_NONE;
+      return 0;
+    }
+    if (pcmStream == PCM_BONG) {
       if (themeFrames) { pcmStart(PCM_THEME); continue; }
       pcmStream = PCM_NONE;
       return 0;
@@ -742,7 +736,9 @@ static inline int32_t pcmNextSample() {
     pcmHighNib = false;
     break;
   }
-  const uint8_t *data = pcmStream == PCM_CHANT ? bootChantData : themeData;
+  const uint8_t *data =
+      pcmStream == PCM_CHANT ? bootChantData
+      : pcmStream == PCM_BONG ? bongHitData : themeData;
   uint8_t b = pgm_read_byte(&data[pcmPos >> 1]);
   uint8_t n = pcmHighNib ? (b >> 4) : (b & 0xF);
   pcmHighNib = !pcmHighNib;
@@ -765,24 +761,52 @@ static inline int32_t pcmNextSample() {
 static int16_t stereoBuf[480 * 2];
 static void audioSynthChunk() {
   const uint32_t PHASE_STEP = (uint32_t)(4294967296.0 / AUDIO_RATE);
-  for (int i = 0; i < 480; ++i) {
-    int32_t s = 0;
-    if (pcmLeadFreq) {
-      leadPhase += (uint32_t)pcmLeadFreq * PHASE_STEP;
-      s += (leadPhase & 0x80000000UL) ? -12000 : 12000;
+  // Refill pacing: the codec drains the DMA ring at exactly AUDIO_RATE, so
+  // each pump replaces whatever drained since the previous one. The original
+  // fixed-480-frame chunk with a non-blocking write let the main loop outrun
+  // the codec (2x-fast music, glitchy button jingles), and a fixed blocking
+  // chunk still starved the splash's 80 ms pump cadence (glitchy chant).
+  // Covering the elapsed time keeps every cadence smooth.
+  static uint32_t lastPumpMs = 0;
+  uint32_t now = millis();
+  uint32_t elapsedMs = lastPumpMs ? now - lastPumpMs : 80;
+  lastPumpMs = now;
+  if (elapsedMs > 200) elapsedMs = 200;   // never queue more than ~the ring
+  int framesToFill = (int)elapsedMs * (AUDIO_RATE / 1000);
+  while (framesToFill > 0) {
+    int chunk = framesToFill > 480 ? 480 : framesToFill;
+    for (int i = 0; i < chunk; ++i) {
+      int32_t s = 0;
+      if (pcmLeadFreq) {
+        leadPhase += (uint32_t)pcmLeadFreq * PHASE_STEP;
+        // Jingle voice rides ~6 dB under the theme's PCM level so sound
+        // effects track the music volume knob without blasting over it.
+        s += (leadPhase & 0x80000000UL) ? -6000 : 6000;
+      }
+      if (pcmDrumFreq) {
+        drumPhase += (uint32_t)pcmDrumFreq * PHASE_STEP;
+        int damp = pcmDrumFreq > 400 ? 6000 : (pcmDrumFreq <= 120 ? 12000 : 9000);
+        s += (drumPhase & 0x80000000UL) ? -damp : damp;
+      }
+      if (pcmStream) s += (pcmNextSample() * 9) / 10;   // PCM sample voice
+      if (s > 32767) s = 32767;
+      else if (s < -32768) s = -32768;
+      stereoBuf[2 * i] = stereoBuf[2 * i + 1] = (int16_t)s;
     }
-    if (pcmDrumFreq) {
-      drumPhase += (uint32_t)pcmDrumFreq * PHASE_STEP;
-      int damp = pcmDrumFreq > 400 ? 6000 : (pcmDrumFreq <= 120 ? 12000 : 9000);
-      s += (drumPhase & 0x80000000UL) ? -damp : damp;
+    // Block until the DMA ring accepts the whole chunk: the decoder must not
+    // advance past what the codec will actually consume.
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(stereoBuf);
+    size_t remain = (size_t)chunk * 2 * sizeof(int16_t);
+    while (remain) {
+      size_t written = 0;
+      if (i2s_channel_write(audioTx, p, remain, &written, 100) != ESP_OK ||
+          written == 0)
+        return;                    // channel stopped: don't spin forever
+      p += written;
+      remain -= written;
     }
-    if (pcmStream) s += (pcmNextSample() * 9) / 10;   // PCM sample voice
-    if (s > 32767) s = 32767;
-    else if (s < -32768) s = -32768;
-    stereoBuf[2 * i] = stereoBuf[2 * i + 1] = (int16_t)s;
+    framesToFill -= chunk;
   }
-  size_t written = 0;
-  i2s_channel_write(audioTx, stereoBuf, sizeof(stereoBuf), &written, 0);
 }
 
 void audioPump() {
@@ -790,7 +814,9 @@ void audioPump() {
   if (musicVolume != audioLastVol) {
     audioLastVol = musicVolume;
     if (musicVolume == 0) { es8311Mute(true); ampEnable(false); }
-    else { es8311SetVolume(musicVolume); es8311Mute(false); ampEnable(true); }
+    // The options UI still runs 0..100, but the amp is capped: 100% on
+    // screen drives the codec at 55% so the speaker stays comfortable.
+    else { es8311SetVolume(musicVolume * 55 / 100); es8311Mute(false); ampEnable(true); }
   }
   audioSynthChunk();   // always pump (silence when idle) — DMA hates gaps
 }
@@ -1193,6 +1219,7 @@ void saveGame() {
   preferences.putUChar("seedType", seedStrain);
   preferences.putUChar("activeType", activeStrain);
   preferences.putUShort("strainMask", harvestedStrainMask);
+  preferences.putUShort("plantVar", plantVariant);
   preferences.putUChar("strainOpen", strainUnlockedThrough);
   preferences.putBytes("stashArr", stashByStrain, sizeof(stashByStrain));
   preferences.putBytes("hashArr", hashByStrain, sizeof(hashByStrain));
@@ -1365,6 +1392,7 @@ void loadGame() {
   rollingPapers = preferences.getUChar("papers", 0);
   growthBoostTicks = preferences.getUChar("growBoost", 0);
   plantActive = preferences.getBool("active", true);
+  plantVariant = preferences.getUShort("plantVar", 1);
   firstPlantingDone = preferences.getBool("plantDone", true);
   farmerCharacter = preferences.getUChar("farmer", 0);
   if (farmerCharacter > 9) farmerCharacter = 0;
@@ -2034,11 +2062,11 @@ void drawBatteryStatus(int x, int cy) {
 void drawHeader() {
   game.fillRect(0, 0, SCREEN_W, HEADER_H, 0x0861);
   game.drawFastHLine(0, HEADER_H - 1, SCREEN_W, 0x4D89);
-  drawLeafLogo(7, 2, 1, TFT_WHITE);
+  drawLeafLogo(5, 2, 1, TFT_WHITE);
   game.setTextColor(TEXT_MAIN, 0x0861);
-  game.drawString("WINFLORIDA", 35, 4, 2);
+  game.drawString("WIN FLORIDA", 31, 4, 2);   // 81px wide in font 2
   game.setTextColor(TEXT_DIM, 0x0861);
-  game.drawString(growerName, 36, 18, 1);
+  game.drawString(growerName, 32, 18, 1);
 
   char money[14];
   snprintf(money, sizeof(money), "$%u", credits);
@@ -2052,19 +2080,19 @@ void drawHeader() {
   uint8_t sIdx = min(9, (int)(stonedLevel / 10));
   uint8_t lit = min(10, (int)((stonedLevel + 9) / 10));
   // Mini head + stoned meter as one centered block: head spans cx-9..cx+9,
-  // meter track cx+12..cx+102, so the block's center is cx+46.5 — cx=114 puts
-  // it on the screen's horizontal center (160) and still clears the WINFLORIDA
-  // wordmark (ends near x=99) and the money readout (starts near x=218).
-  drawCharacterMini(114, 0, farmerCharacter);   // mini head: current grower
+  // meter track cx+10..cx+89, so the block's center is cx+40 — cx=121 puts it
+  // right of the WIN FLORIDA wordmark (real font-2 width 81px, ending x=112)
+  // and clear of the money readout (starts near x=218).
+  drawCharacterMini(121, 0, farmerCharacter);   // mini head: current grower
   game.setTextColor(TEXT_DIM, 0x0861);
-  game.drawString(stonedLevelNames[sIdx], 127, 3, 1);
-  game.fillRoundRect(126, 14, 90, 7, 3, 0x0630);
+  game.drawString(stonedLevelNames[sIdx], 132, 3, 1);
+  game.fillRoundRect(131, 14, 80, 7, 3, 0x0630);
   for (uint8_t i = 0; i < lit; ++i) {
     uint16_t seg = i < 3 ? rgb565(70, 180, 90)
                  : i < 6 ? rgb565(230, 200, 60)
                  : i < 8 ? rgb565(240, 140, 40)
                  : rgb565(235, 60, 60);
-    game.fillRect(127 + i * 9, 15, 8, 5, seg);
+    game.fillRect(131 + i * 8, 15, 7, 5, seg);
   }
 
   drawGearIcon(301, 14);
@@ -2127,27 +2155,49 @@ void drawLeaflet(int bx, int by, int tx, int ty, int width,
   }
 }
 
-void drawFanLeaf(int x, int y, float scale, int tiltDegrees) {
-  const uint16_t leafDark = rgb565(20, 76, 35);
-  const uint16_t leafMid = rgb565(38, 130, 58);
-  const uint16_t leafLight = rgb565(78, 166, 75);
-  const uint16_t vein = rgb565(148, 194, 111);
-  const int offsets[] = {-66, -44, -22, 0, 22, 44, 66};
-  const int lengths[] = {19, 27, 34, 43, 34, 27, 19};
-
-  for (int i = 0; i < 7; ++i) {
-    float angle = (tiltDegrees + offsets[i]) * 0.0174532925f;
-    int length = (int)(lengths[i] * scale);
+void drawFanLeafTinted(int x, int y, float scale, int tiltDegrees,
+                       int fingers, uint8_t tint) {
+  // Four hand-tuned palettes so each plant's canopy leans a slightly
+  // different shade of green (classic emerald, forest, lime, blue-green).
+  uint16_t leafDark, leafMid, leafLight, vein;
+  switch (tint & 3) {
+    case 1:  leafDark = rgb565(14, 64, 40);  leafMid = rgb565(30, 118, 66);
+             leafLight = rgb565(66, 150, 86); vein = rgb565(136, 184, 124); break;
+    case 2:  leafDark = rgb565(26, 84, 28);  leafMid = rgb565(52, 142, 42);
+             leafLight = rgb565(96, 180, 62); vein = rgb565(168, 204, 102); break;
+    case 3:  leafDark = rgb565(16, 74, 58);  leafMid = rgb565(34, 124, 80);
+             leafLight = rgb565(70, 158, 102); vein = rgb565(140, 190, 132); break;
+    default: leafDark = rgb565(20, 76, 35);  leafMid = rgb565(38, 130, 58);
+             leafLight = rgb565(78, 166, 75); vein = rgb565(148, 194, 111); break;
+  }
+  // Seedlings fan 3 fingers, young veg 5, mature plants the full 7.
+  static const int offs7[] = {-66, -44, -22, 0, 22, 44, 66};
+  static const int lens7[] = {19, 27, 34, 43, 34, 27, 19};
+  static const int offs5[] = {-44, -22, 0, 22, 44};
+  static const int lens5[] = {27, 34, 43, 34, 27};
+  static const int offs3[] = {-22, 0, 22};
+  static const int lens3[] = {34, 43, 34};
+  const int *offs = fingers <= 3 ? offs3 : fingers == 5 ? offs5 : offs7;
+  const int *lens = fingers <= 3 ? lens3 : fingers == 5 ? lens5 : lens7;
+  int count = fingers <= 3 ? 3 : fingers == 5 ? 5 : 7;
+  for (int i = 0; i < count; ++i) {
+    float angle = (tiltDegrees + offs[i]) * 0.0174532925f;
+    int length = (int)(lens[i] * scale);
     int tx = x + (int)(sinf(angle) * length);
     int ty = y - (int)(cosf(angle) * length);
-    int width = (int)((i == 3 ? 9 : (i == 2 || i == 4 ? 7 : 5)) * scale);
+    int mid = count / 2;
+    int width = (int)((i == mid ? 9 : (i == mid - 1 || i == mid + 1 ? 7 : 5)) * scale);
     if (width < 3) width = 3;
     drawLeaflet(x, y, tx, ty, width, leafDark, leafMid, vein);
-    if (i == 3) {
+    if (i == mid) {
       // Highlight the central leaflet for depth.
       game.drawLine(x, y, tx, ty, leafLight);
     }
   }
+}
+
+void drawFanLeaf(int x, int y, float scale, int tiltDegrees) {
+  drawFanLeafTinted(x, y, scale, tiltDegrees, 7, 0);
 }
 
 void drawPot() {
@@ -2281,71 +2331,135 @@ void drawArtBud(int x, int y, float s, int pistils) {
   }
 }
 
-void drawArtPlant(int cx, int stage) {
+static uint32_t variantNext(uint32_t &rs) {
+  rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5;
+  return rs;
+}
+
+// ---- seeded plant transform -------------------------------------------------
+// One code path draws the seeded pheno everywhere: the small garden (scale 1),
+// the fullscreen room (magnified) and the harvest cutscene (relocated, slightly
+// scaled to fit). All views share the same per-pot seed and geometry, so the
+// plants always look exactly the same.
+static int zRefCx, zX0, zSoilY;
+static float zSc;
+static inline int zX(int x) { return zX0 + (int)((x - zRefCx) * zSc); }
+static inline int zY(int y) { return zSoilY + (int)((y - 129) * zSc); }
+
+static void zBranch(int x1, int y1, int x2, int y2, uint16_t c) {
+  const int ax = zX(x1), ay = zY(y1), bx = zX(x2), by = zY(y2);
+  game.drawLine(ax, ay, bx, by, c);
+  game.drawLine(ax + 1, ay, bx + 1, by, c);
+  if (zSc > 1.2f) {   // thicker stroke so zoomed stems keep their weight
+    game.drawLine(ax, ay + 1, bx, by + 1, c);
+    game.drawLine(ax, ay - 1, bx, by - 1, c);
+  }
+}
+
+static void zPot(int cx) {
+  const int x0 = zX(cx - 12), w = (int)(25 * zSc);
+  const int y0 = zSoilY, hRim = (int)(2 * zSc), hBody = (int)(11 * zSc);
+  const uint16_t rim = rgb565(204, 131, 77), out = rgb565(78, 43, 30),
+                 body = rgb565(147, 75, 45), hi = rgb565(190, 112, 66);
+  game.fillRect(x0, y0, w, hRim, rim);
+  game.drawPixel(x0, y0, out);
+  game.drawPixel(x0 + w - 1, y0, out);
+  const int bw = w * 3 / 5, ins = (w - bw) / 2;
+  game.fillTriangle(x0, y0 + hRim, x0 + w, y0 + hRim, x0 + w - ins, y0 + hBody, body);
+  game.fillTriangle(x0, y0 + hRim, x0 + w - ins, y0 + hBody, x0 + ins, y0 + hBody, body);
+  game.fillRect(x0 + ins, y0 + hBody - 1, bw, 1 + (int)zSc, out);
+  game.drawLine(x0 + (int)(6 * zSc), y0 + hRim + (int)(4 * zSc),
+                x0 + (int)(7 * zSc), y0 + hBody - 1, hi);
+}
+
+static void drawArtPlantT(int cx, int stage, int screenX, int soilScreenY,
+                          float sc, bool withPot) {
+  // Every draw is seeded from plantVariant + this pot's position, so the four
+  // roommates grow as distinct phenos and every new planting rolls a fresh
+  // look for the whole grow. Seeding is deterministic per frame: no flicker.
+  uint32_t rs = (uint32_t)plantVariant * 2654435761u ^ ((uint32_t)cx * 97u + 7u);
+  variantNext(rs); variantNext(rs); variantNext(rs);
+  const int lean = (int)(variantNext(rs) % 9) - 4;           // stem lean -4..+4
+  const uint8_t tint = (variantNext(rs) >> 6) & 3;           // canopy palette
+  // Vigor: each roommate reaches 0.78..1.24 of the stage's nominal height,
+  // so some plants stay short and bushy while others stretch tall and lanky.
+  const int vigorX100 = 78 + (int)(variantNext(rs) % 47);    // 78..124
+  const int stretch = (int)(variantNext(rs) % 5);            // internode drift
+
+  zRefCx = cx; zX0 = screenX; zSoilY = soilScreenY; zSc = sc;
+
   const uint16_t stemThin = rgb565(99, 116, 97);
   const uint16_t stemA = rgb565(119, 131, 108);
   const uint16_t stemB = rgb565(88, 132, 60);
-  // A stake-thin stem spans the room height in every stage.
-  if (stage >= 2) {
-    game.drawFastVLine(cx, 57 + HEADER_H, 72, stemA);
-    game.drawFastVLine(cx + 1, 57 + HEADER_H, 72, stemB);
-  } else {
-    game.drawFastVLine(cx, 57 + HEADER_H, 72, stemThin);
+
+  const int soil = 129;
+  const int nominal = stage == 0 ? 16 : stage == 1 ? 28 : stage == 2 ? 42
+                      : stage == 3 ? 60 : 80;
+  const int topY = soil - nominal * vigorX100 / 100 +
+                   (int)(variantNext(rs) % 5) - 2;
+
+  // Stem: a gentle bow toward the plant's lean, drawn in two segments.
+  const int midY = (soil + topY) / 2;
+  const int midX = cx + lean / 3;
+  zBranch(cx, soil, midX, midY, stemThin);
+  zBranch(midX, midY, cx + lean, topY, stemThin);
+  zBranch(cx + 1, soil, midX + 1, midY, stemA);
+  zBranch(midX + 1, midY, cx + 1 + lean, topY, stemB);
+  if (withPot) zPot(cx + 1);
+
+  // Side branches alternate up the stem and the lower ones run longer — the
+  // real cannabis Christmas-tree habit. Each branch carries a crown fan leaf,
+  // and from flowering on, its own bud.
+  const int fingers = stage == 0 ? 3 : stage == 1 ? 5 : 7;
+  const int branches = stage == 0 ? 0 : stage == 1 ? 2
+                       : 3 + (stretch >= 2 ? 1 : 0);
+  for (int i = 0; i < branches; ++i) {
+    const int sgn = (i & 1) ? 1 : -1;              // alternate sides
+    const int ys = soil - (i + 1) * (soil - topY) / (branches + 1);
+    const int rise = 3 + (int)(variantNext(rs) % 5);
+    int len = (stage == 1 ? 9 : stage == 2 ? 13 : stage == 3 ? 15 : 17)
+              - i * 2 + (int)(variantNext(rs) % 4) - 1;
+    if (len < 5) len = 5;
+    const int tipX = cx + sgn * len + lean / 4;
+    const int tipY = ys - rise;
+    zBranch(cx + lean / 3, ys, tipX, tipY, stemA);
+    zBranch(cx + 1 + lean / 3, ys, tipX + 1, tipY, stemB);
+    // Fan leaf crowning the branch, angled outward with its own jitter.
+    drawFanLeafTinted(zX(tipX), zY(tipY - 1),
+                      (stage >= 3 ? 0.52f : 0.46f) *
+                          (0.90f + (variantNext(rs) % 25) / 100.0f) * sc,
+                      sgn * (28 + (int)(variantNext(rs) % 15)),
+                      fingers, tint);
+    if (stage >= 3) {
+      float bs = (stage == 4 ? 1.05f : 0.75f) *
+                 (0.85f + (variantNext(rs) % 30) / 100.0f);
+      drawArtBud(zX(tipX), zY(tipY - 2) - HEADER_H, bs * sc, stage == 4 ? 6 : 4);
+      if (stage == 4)
+        drawArtBud(zX(tipX - sgn * 3), zY(tipY + 3) - HEADER_H, bs * 0.75f * sc, 5);
+    }
   }
-  drawArtPot(cx + 1);
-  int topY = stage == 0 ? 112 : stage == 1 ? 100 : stage == 2 ? 90
-             : stage == 3 ? 78 : 54;
+
+  // Crown just under the stem tip: staggered leaves, never mirrored.
+  if (stage == 0) {
+    drawFanLeafTinted(zX(cx + lean), zY(topY), 0.45f * sc,
+                      (int)(variantNext(rs) % 13) - 6, 3, tint);
+  } else {
+    drawFanLeafTinted(zX(cx + lean - 5), zY(topY + 5), 0.50f * sc,
+                      -38 + (int)(variantNext(rs) % 9), fingers, tint);
+    drawFanLeafTinted(zX(cx + lean + 5), zY(topY + 7), 0.50f * sc,
+                      38 - (int)(variantNext(rs) % 9), fingers, tint);
+    drawFanLeafTinted(zX(cx + lean), zY(topY), 0.58f * sc,
+                      (int)(variantNext(rs) % 9) - 4, fingers, tint);
+  }
   if (stage >= 3) {
-    if (stage == 4) {
-      // Branches rising up-out to terminal buds plus a stacked cola spire.
-      for (int sgn = -1; sgn <= 1; sgn += 2) {
-        drawArtBranch(cx, 104, cx + sgn * 11, 82, stemA);
-        drawArtBranch(cx, 116, cx + sgn * 9, 98, stemA);
-      }
-      drawArtBud(cx, 64, 1.3f, 7);
-      drawArtBud(cx - 1, 58, 1.1f, 6);
-      drawArtBud(cx + 1, 52, 0.95f, 6);
-      drawArtBud(cx - 6, 66, 1.0f, 5);
-      drawArtBud(cx + 6, 66, 1.0f, 5);
-      drawFanLeaf(cx - 9, 68 + HEADER_H, 0.42f, -50);
-      drawFanLeaf(cx + 9, 68 + HEADER_H, 0.42f, 50);
-    } else {
-      for (int sgn = -1; sgn <= 1; sgn += 2) {
-        drawArtBranch(cx, 104, cx + sgn * 12, 80, stemA);
-        drawArtBranch(cx, 114, cx + sgn * 10, 92, stemA);
-      }
-      drawArtBud(cx - 12, 77, 0.95f, 5);
-      drawArtBud(cx + 12, 77, 0.95f, 5);
-      drawArtBud(cx - 10, 89, 1.0f, 5);
-      drawArtBud(cx + 10, 89, 1.0f, 5);
-    }
-  } else {
-    drawFanLeaf(cx, topY + HEADER_H, stage ? 0.6f : 0.45f, 0);
-  }
-  // Growth nodes: paired fan leaves, budding from stage 3 up.
-  struct GN { int8_t y; float s; float bs; };
-  static const GN N0[] = {{119, 0.55f, 0}};
-  static const GN N1[] = {{106, 0.6f, 0}, {118, 0.55f, 0}};
-  static const GN N2[] = {{96, 0.65f, 0}, {106, 0.6f, 0}, {116, 0.55f, 0}};
-  static const GN N3[] = {{84, 0.6f, 0.8f}, {96, 0.6f, 0.95f},
-                          {108, 0.6f, 0.7f}, {118, 0.55f, 0}};
-  static const GN N4[] = {{72, 0.5f, 1.05f}, {84, 0.55f, 1.1f},
-                          {96, 0.55f, 1.0f}, {108, 0.55f, 0.85f},
-                          {118, 0.5f, 0}};
-  const GN *ns = stage == 0 ? N0 : stage == 1 ? N1 : stage == 2 ? N2
-                 : stage == 3 ? N3 : N4;
-  int nc = stage == 0 ? 1 : stage == 1 ? 2 : stage == 2 ? 3
-           : stage == 3 ? 4 : 5;
-  for (int i = 0; i < nc; ++i) {
-    const GN &n = ns[i];
-    drawFanLeaf(cx - (int)(8 * n.s), n.y + HEADER_H, n.s * 0.62f, -36);
-    drawFanLeaf(cx + (int)(8 * n.s), n.y + HEADER_H, n.s * 0.62f, 36);
-    if (n.bs > 0) {
-      drawArtBud(cx - (int)(11 * n.s), n.y - (int)(8 * n.s), n.bs,
-                 stage == 4 ? 6 : 3);
-      drawArtBud(cx + (int)(11 * n.s), n.y - (int)(8 * n.s), n.bs,
-                 stage == 4 ? 6 : 3);
-    }
+    // Dominant main cola: stacked buds tapering up the stem tip.
+    const int mj = (int)(variantNext(rs) % 3);
+    drawArtBud(zX(cx + lean), zY(topY + 8 + mj) - HEADER_H,
+               (stage == 4 ? 1.45f : 1.0f) * sc, 7);
+    drawArtBud(zX(cx + lean - 1), zY(topY + 2 + mj) - HEADER_H,
+               (stage == 4 ? 1.20f : 0.85f) * sc, 6);
+    drawArtBud(zX(cx + lean + 1), zY(topY - 4 + mj) - HEADER_H,
+               (stage == 4 ? 0.95f : 0.70f) * sc, 6);
   }
   if (stage == 4) {
     // White pistil flecks scattered across the whole canopy.
@@ -2354,163 +2468,33 @@ void drawArtPlant(int cx, int stage) {
                                      {12, 102}, {35, 102}, {18, 72}, {29, 72},
                                      {14, 84}, {33, 84}, {20, 96}, {27, 96}};
     for (int i = 0; i < 16; ++i) {
-      game.drawPixel(cx - 23 + sp[i][0], sp[i][1] + HEADER_H,
+      game.drawPixel(zX(cx - 23 + sp[i][0]), zY(sp[i][1]),
                      rgb565(224, 220, 183));
-      game.drawPixel(cx - 23 + sp[i][0] + 1, sp[i][1] - 1 + HEADER_H,
+      game.drawPixel(zX(cx - 23 + sp[i][0]) + 1, zY(sp[i][1]) - 1,
                      rgb565(205, 201, 157));
     }
   }
 }
 
-void switchToSdBus() {
-#if !defined(S3_CYD)
-  touchscreenSPI.end();
-  touchscreenSPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-#endif
-  // S3 CYD: separate buses; nothing to switch.
+void drawArtPlant(int cx, int stage) {   // small garden: 1:1, identical view
+  drawArtPlantT(cx, stage, cx, 129 + HEADER_H, 1.0f, true);
 }
 
-void switchToTouchBus() {
-#if !defined(S3_CYD)
-  touchscreenSPI.end();
-  touchscreenSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
-#endif
-}
-
-uint16_t readLE16(File &file) {
-  uint8_t bytes[2];
-  if (file.read(bytes, 2) != 2) return 0;
-  return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
-}
-
-uint32_t readLE32(File &file) {
-  uint8_t bytes[4];
-  if (file.read(bytes, 4) != 4) return 0;
-  return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
-         ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
-}
-
-bool drawPlantBitmap() {
-  if (!sdMounted || !plantActive) return false;
-
-  char filename[16];
-  snprintf(filename, sizeof(filename), "/PLANT%d.BMP", stageForGrowth());
-  switchToSdBus();
-  File file = SD.open(filename, FILE_READ);
-  bool drawn = false;
-
-  if (file) {
-    file.seek(10);
-    uint32_t pixelOffset = readLE32(file);
-    file.seek(18);
-    int32_t width = (int32_t)readLE32(file);
-    int32_t height = (int32_t)readLE32(file);
-    file.seek(28);
-    uint16_t bitsPerPixel = readLE16(file);
-    uint32_t compression = readLE32(file);
-
-    if (width == ART_W && abs(height) == ART_H &&
-        bitsPerPixel == 24 && compression == 0) {
-      uint32_t rowBytes = ((uint32_t)width * 3 + 3) & ~3UL;
-      bool oldSwap = game.getSwapBytes();
-      game.setSwapBytes(true);
-      file.seek(pixelOffset);
-
-      drawn = true;
-      for (int row = 0; row < ART_H; ++row) {
-        if (file.read(bmpRow, rowBytes) != rowBytes) {
-          drawn = false;
-          break;
-        }
-        for (int col = 0; col < ART_W; ++col) {
-          uint8_t b = bmpRow[col * 3 + 0];
-          uint8_t g = bmpRow[col * 3 + 1];
-          uint8_t r = bmpRow[col * 3 + 2];
-          rgbRow[col] = rgb565(r, g, b);
-        }
-        int screenY = height > 0 ? (ART_H - 1 - row) : row;
-        // Scale the 178-wide art row onto the panel (x1.5, y 4/3).
-        for (int col = 0; col < ART_W; ++col) {
-          int px0 = SX(col), px1 = SX(col + 1);
-          for (int px = px0; px < px1; ++px) panelRow[px] = rgbRow[col];
-        }
-        int py0 = SY(HEADER_H + screenY), py1 = SY(HEADER_H + screenY + 1);
-        for (int py = py0; py < py1; ++py)
-          blitPanelRow(0, py, SX(ART_W), panelRow);
-      }
-      game.setSwapBytes(oldSwap);
-    }
-    file.close();
+// Fullscreen room: the same seeded phenos, magnified around their soil line.
+void drawArtPlantZoomed(int cx, int stage) {
+  if (!plantActive) {                    // empty room: bare pots only
+    zRefCx = cx; zX0 = (int)(cx * 1.78f); zSoilY = 205; zSc = 1.78f;
+    zPot(cx + 1);
+    return;
   }
-
-  switchToTouchBus();
-  return drawn;
+  drawArtPlantT(cx, stage, (int)(cx * 1.78f), 205, 1.78f, true);
 }
 
-bool drawPlantBitmapFullScreenRegion(int xStart, int yStart, int xEnd, int yEnd) {
-  if (!sdMounted || !plantActive) return false;
 
-  char filename[16];
-  snprintf(filename, sizeof(filename), "/PLANT%d.BMP", stageForGrowth());
-  switchToSdBus();
-  File file = SD.open(filename, FILE_READ);
-  bool drawn = false;
-  if (file) {
-    file.seek(10);
-    uint32_t pixelOffset = readLE32(file);
-    file.seek(18);
-    int32_t width = (int32_t)readLE32(file);
-    int32_t height = (int32_t)readLE32(file);
-    file.seek(28);
-    uint16_t bitsPerPixel = readLE16(file);
-    uint32_t compression = readLE32(file);
 
-    if (width == ART_W && abs(height) == ART_H && bitsPerPixel == 24 && compression == 0) {
-      uint32_t rowBytes = ((uint32_t)width * 3 + 3) & ~3UL;
-      bool oldSwap = game.getSwapBytes();
-      game.setSwapBytes(true);
-      file.seek(pixelOffset);
-      drawn = true;
-      for (int row = 0; row < ART_H; ++row) {
-        if (file.read(bmpRow, rowBytes) != rowBytes) {
-          drawn = false;
-          break;
-        }
-        for (int col = 0; col < ART_W; ++col) {
-          uint8_t b = bmpRow[col * 3 + 0];
-          uint8_t g = bmpRow[col * 3 + 1];
-          uint8_t r = bmpRow[col * 3 + 2];
-          rgbRow[col] = rgb565(r, g, b);
-          int x0 = SX((col * SCREEN_W) / ART_W);
-          int x1 = SX(((col + 1) * SCREEN_W) / ART_W);
-          for (int x = x0; x < x1; ++x) scaledPlantRow[x] = rgbRow[col];
-        }
-        int screenY = height > 0 ? ART_H - 1 - row : row;
-        int y0 = (screenY * SCREEN_H) / ART_H;
-        int y1 = ((screenY + 1) * SCREEN_H) / ART_H;
-        // Push every PHYSICAL row of each logical band — SY() rounds down, so
-        // pushing only SY(y) skips one panel row whenever the band spans two
-        // rows (the horizontal lines across the fullscreen picture).
-        int py0 = SY(y0), py1 = SY(y1);
-        int pyStart = SY(yStart), pyEnd = SY(yEnd);
-        for (int py = py0; py < py1; ++py) {
-          if (py >= pyStart && py < pyEnd) {
-            blitPanelRow(SX(xStart), py, SWD(xStart, xEnd - xStart),
-                         &scaledPlantRow[SX(xStart)]);
-          }
-        }
-      }
-      game.setSwapBytes(oldSwap);
-    }
-    file.close();
-  }
-  switchToTouchBus();
-  return drawn;
-}
 
-bool drawPlantBitmapFullScreen() {
-  return drawPlantBitmapFullScreenRegion(0, 0, SCREEN_W, SCREEN_H);
-}
+
+
 
 void drawMiniRoomPlant(int cx, int potBase, float scale) {
   uint16_t potDark = rgb565(92, 49, 34);
@@ -2563,12 +2547,21 @@ void drawFullScreenGardenFallback() {
   game.drawFastVLine(306, 0, SCREEN_H - 14, rgb565(29, 53, 51));
   game.drawFastHLine(13, 53, 294, rgb565(23, 44, 42));
   game.drawFastHLine(13, 106, 294, rgb565(23, 44, 42));
-  game.fillRect(0, 220, SCREEN_W, 8, rgb565(32, 49, 39));
-  game.drawFastHLine(0, 220, SCREEN_W, rgb565(76, 91, 61));
-  drawMiniRoomPlant(48, 220, 1.05f);
-  drawMiniRoomPlant(122, 220, 1.2f);
-  drawMiniRoomPlant(198, 220, 1.2f);
-  drawMiniRoomPlant(272, 220, 1.05f);
+  // Sage trellis wires carried over from the small garden view, with the
+  // posts between them, so the zoomed room keeps its structure.
+  static const int wires[4] = {60, 92, 124, 156};
+  for (int i = 0; i < 4; ++i)
+    game.drawFastHLine(13, wires[i], 294, rgb565(99, 116, 97));
+  for (int i = 0; i < 5; ++i)
+    game.drawFastVLine(64 + i * 48, 53, 110, rgb565(43, 66, 58));
+  game.fillRect(0, 224, SCREEN_W, 8, rgb565(32, 49, 39));
+  game.drawFastHLine(0, 224, SCREEN_W, rgb565(76, 91, 61));
+  // The same seeded phenos as the small garden, magnified.
+  const int stage = stageForGrowth();
+  drawArtPlantZoomed(24, stage);
+  drawArtPlantZoomed(68, stage);
+  drawArtPlantZoomed(112, stage);
+  drawArtPlantZoomed(156, stage);
 }
 
 void restoreFullScreenFallbackRegion() {
@@ -2583,12 +2576,22 @@ void restoreFullScreenFallbackRegion() {
   }
   game.drawFastVLine(306, 80, 130, rgb565(29, 53, 51));
   game.drawFastHLine(left, 106, right - left, rgb565(23, 44, 42));
-  drawMiniRoomPlant(198, 220, 1.2f);
-  drawMiniRoomPlant(272, 220, 1.05f);
+  // Trellis wires + posts continue through the restored band so the farmer
+  // overlay repair never erases the structure.
+  static const int rw[3] = {92, 124, 156};
+  for (int i = 0; i < 3; ++i)
+    game.drawFastHLine(left, rw[i], right - left, rgb565(99, 116, 97));
+  for (int i = 0; i < 2; ++i)
+    game.drawFastVLine(208 + i * 48, 80, 83, rgb565(43, 66, 58));
+  {
+    const int stage = stageForGrowth();
+    drawArtPlantZoomed(112, stage);   // same phenos, redrawn over the overlay
+    drawArtPlantZoomed(156, stage);
+  }
 }
 
 void drawPlantFullScreenPage() {
-  if (!plantActive || !drawPlantBitmapFullScreen()) drawFullScreenGardenFallback();
+  drawFullScreenGardenFallback();  // vector room: trellis + mini plants
   drawButton(264, 5, 48, 23, "CLOSE", ACCENT_DARK);
   game.fillRoundRect(87, 219, 146, 17, 4, 0x0861);
   game.setTextColor(TEXT_MAIN, 0x0861);
@@ -2693,6 +2696,7 @@ void plantSeedFromTap(int x, int y) {
   if (plantedPotMask == 0x0F) {
     firstPlantingDone = true;
     plantActive = true;
+    plantVariant = (uint16_t)random(65536);  // every grow grows differently
     activeStrain = plantStrain;
     growth = 0;
     hydration = 65;
@@ -2711,7 +2715,6 @@ void plantSeedFromTap(int x, int y) {
 }
 
 void drawPlant() {
-  if (drawPlantBitmap()) return;
   drawGardenBackdrop();
   if (!plantActive) {
     // Empty room: four bare pots and the invite to plant.
@@ -3128,6 +3131,25 @@ void drawGrowerIdCard() {
   game.drawRightString(statLine, 302, 100, 1);
 }
 
+// ---- Long-stall audio guard ----------------------------------------------
+// Modes that block the loop for seconds (OTA's WiFi connect/download, the SD
+// installer's serial waits) starve the audio pump; an emptied DMA ring
+// replays its last chunk, which the speaker renders as a glitchy stutter
+// that repeats. Kill the voices and mute before entering such a mode, then
+// let the garden groove come back on the way out.
+static void audioPauseForStall() {
+  pcmStream = PCM_NONE;
+  chipToneOff();
+  drumToneOff();
+  activeSong = nullptr;
+  drumPlaying = false;
+  if (audioTx && musicVolume) { es8311Mute(true); ampEnable(false); }
+}
+static void audioResumeAfterStall() {
+  audioLastVol = 255;  // make the next pump re-apply codec volume + amp
+  if (musicVolume && !pcmStream) pcmStart(PCM_THEME);  // theme restarts clean
+}
+
 // ============ WiFi login + OTA updates from GitHub (v15) ============
 // WIFI LOGIN opens the on-screen keyboard to type the network name and
 // password (saved to NVS with the game save). CHECK UPDATES connects,
@@ -3150,7 +3172,7 @@ struct OtaBrand {
   const char *s28Bin;  // 2.8-inch S3 asset
 };
 static const OtaBrand otaBrands[] = {
-  {"WINFLORIDA", "https://github.com/VYBN3D/WinFloridaGardenSim/releases/latest/download/",
+  {"WIN FLORIDA", "https://github.com/VYBN3D/WinFloridaGardenSim/releases/latest/download/",
    "WinFloridaGardenSim_S3.ino.bin", "WinFloridaGardenSim_S28.ino.bin"},
   {"VYBN", "https://github.com/VYBN3D/VYBNGardenSim/releases/latest/download/",
    "VYBNGardenSim_S3.ino.bin", "VYBNGardenSim_S28.ino.bin"},
@@ -3215,10 +3237,12 @@ static int wifiSavedIndex(const char *ssid) {
 
 static void otaConnectToSaved(uint16_t waitMs) {
   if (wifiConnected() || !wifiSsid[0]) return;
+  audioPauseForStall();   // the connect wait blocks the pump for seconds
   WiFi.mode(WIFI_STA);
   WiFi.begin(wifiSsid, wifiPass);
   unsigned long start = millis();
   while (!wifiConnected() && millis() - start < waitMs) delay(100);
+  audioResumeAfterStall();
 }
 
 static void otaCheckUpdate() {
@@ -3232,6 +3256,7 @@ static void otaCheckUpdate() {
   }
   snprintf(otaStatus, sizeof(otaStatus), "Checking for updates ...");
   render();
+  audioPauseForStall();    // the version GET can block the pump for seconds
   HTTPClient http;
   WiFiClientSecure tls;
   tls.setInsecure();                   // repo is public; no pinning needed
@@ -3256,6 +3281,7 @@ static void otaCheckUpdate() {
     }
     http.end();
   }
+  audioResumeAfterStall();
   otaRestoreRadio();                   // release the radio back to Nearby
 }
 
@@ -3272,6 +3298,7 @@ static void otaInstallUpdate() {
   }
   snprintf(otaStatus, sizeof(otaStatus), "Downloading update ... KEEP STILL");
   render();
+  audioPauseForStall();    // the bin download can block the pump for minutes
   HTTPClient http;
   WiFiClientSecure tls;
   tls.setInsecure();
@@ -3280,6 +3307,7 @@ static void otaInstallUpdate() {
   http.setTimeout(30000);
   if (!http.begin(tls, String(otaSelectedBase()) + otaSelectedBin())) {
     snprintf(otaStatus, sizeof(otaStatus), "Download failed");
+    audioResumeAfterStall();
     otaBusy = false;
     return;
   }
@@ -3287,6 +3315,7 @@ static void otaInstallUpdate() {
   if (code != 200) {
     snprintf(otaStatus, sizeof(otaStatus), "Download failed (HTTP %d)", code);
     http.end();
+    audioResumeAfterStall();
     otaBusy = false;
     return;
   }
@@ -3294,12 +3323,14 @@ static void otaInstallUpdate() {
   if (size <= 0) {
     snprintf(otaStatus, sizeof(otaStatus), "Download failed (no size)");
     http.end();
+    audioResumeAfterStall();
     otaBusy = false;
     return;
   }
   if (!Update.begin(size)) {
     snprintf(otaStatus, sizeof(otaStatus), "Not enough OTA space");
     http.end();
+    audioResumeAfterStall();
     otaBusy = false;
     return;
   }
@@ -3308,11 +3339,13 @@ static void otaInstallUpdate() {
   if (written != (size_t)size) {
     snprintf(otaStatus, sizeof(otaStatus), "Transfer interrupted");
     Update.abort();
+    audioResumeAfterStall();
     otaBusy = false;
     return;
   }
   if (!Update.end(true)) {
     snprintf(otaStatus, sizeof(otaStatus), "Flash verify failed");
+    audioResumeAfterStall();
     otaBusy = false;
     return;
   }
@@ -4897,6 +4930,7 @@ static void touchWashModal(int x, int y) {
 
 void prepareDemoHarvest() {
   plantActive = true;
+  plantVariant = (uint16_t)random(65536);  // fresh demo pheno
   growth = 100;
   hydration = 100;
   vigor = 100;
@@ -5039,9 +5073,7 @@ void restoreFarmerVisitArt() {
     drawGardenZoomChip();    // the bubble covered the chip's right edge
     drawGardenSidePanel();   // ...and reached into the stats panel
   } else if (page == PLANT_VIEW) {
-    if (!drawPlantBitmapFullScreenRegion(180, 79, 314, 209)) {
-      restoreFullScreenFallbackRegion();
-    }
+    restoreFullScreenFallbackRegion();
   } else {
     render();   // page changed mid-overlay: a clean repaint clears him
     return;
@@ -5504,6 +5536,13 @@ void animateGownUpCutscene() {
 }
 
 void animateSmokeBreak() {
+  // The bong hit carries the scene: the groove sits out, the sample plays,
+  // and the garden theme drops back in when the hit ends.
+  chipToneOff();
+  drumToneOff();
+  activeSong = nullptr;
+  drumPlaying = false;
+  if (audioTx && musicVolume) pcmStart(PCM_BONG);
   beginCutsceneScene();
   for (int frame = 0; frame < 5; ++frame) {
     drawSmokeCutsceneFrame(frame);
@@ -5514,74 +5553,113 @@ void animateSmokeBreak() {
 }
 
 void drawHashWashFrame(int frame) {
-  game.fillRect(0, HEADER_H, SCREEN_W, NAV_Y - HEADER_H, BG);
-  game.fillRoundRect(13, 38, 294, 158, 10, PANEL);
-  game.drawRoundRect(13, 38, 294, 158, 10, PANEL_LIGHT);
-  game.setTextColor(TEXT_MAIN, PANEL);
-  game.drawCentreString("HASH WASH ROOM", 160, 46, 2);
+  // Cinematic wash room in the intro's visual language: gradient wall, a
+  // hanging work lamp, and the grower working right beside the barrel on a
+  // step stool — arms bent, gripping partway up the shaft, no straight-line
+  // reach across the whole room.
+  for (int y = HEADER_H; y < 190; ++y) {
+    float blend = (float)(y - HEADER_H) / 176.0f;
+    uint8_t r = 8 + (uint8_t)(blend * 12);
+    uint8_t g = 13 + (uint8_t)(blend * 17);
+    uint8_t b = 12 + (uint8_t)(blend * 13);
+    game.drawBandHLine(0, y, SCREEN_W, rgb565(r, g, b));
+  }
+  game.drawFastHLine(0, 190, SCREEN_W, rgb565(76, 91, 61));
+  game.fillRect(0, 191, SCREEN_W, NAV_Y - 191, rgb565(34, 47, 40));
+
+  // Work lamp hanging over the barrel: cord, shade, warm bulb.
+  game.fillRect(194, 30, 2, 14, rgb565(57, 66, 60));
+  game.fillTriangle(178, 44, 212, 44, 195, 60, rgb565(57, 66, 60));
+  game.drawFastHLine(178, 43, 35, GOLD);
+  game.fillCircle(195, 46, 3, rgb565(224, 220, 183));
 
   uint16_t woodDark = rgb565(74, 42, 30);
   uint16_t wood = rgb565(143, 83, 49);
   uint16_t woodLight = rgb565(190, 126, 77);
   uint16_t water = rgb565(56, 137, 170);
-  game.fillRoundRect(78, 107, 163, 73, 15, woodDark);
-  game.fillRoundRect(85, 111, 149, 64, 12, wood);
-  for (int x = 103; x <= 216; x += 22) {
-    game.drawFastVLine(x, 116, 53, woodDark);
-    game.drawFastVLine(x + 2, 118, 47, woodLight);
+
+  // Wash barrel, framed on the right half and sitting on the floor.
+  game.fillRoundRect(120, 102, 150, 88, 14, woodDark);
+  game.fillRoundRect(126, 106, 138, 78, 11, wood);
+  for (int x = 142; x <= 248; x += 21) {
+    game.drawFastVLine(x, 112, 66, woodDark);
+    game.drawFastVLine(x + 2, 114, 60, woodLight);
   }
-  game.fillRoundRect(74, 98, 171, 21, 9, woodDark);
-  game.fillRoundRect(80, 99, 159, 15, 7, woodLight);
-  game.fillRoundRect(86, 103, 147, 10, 5, rgb565(55, 45, 35));
-  game.fillRoundRect(91, 106, 137, 7, 3, water);
-  game.drawFastHLine(96, 107, 127, rgb565(115, 204, 216));
+  game.fillRect(120, 126, 150, 4, rgb565(58, 60, 62));
+  game.fillRect(120, 158, 150, 4, rgb565(58, 60, 62));
+  game.drawFastHLine(126, 126, 138, rgb565(96, 99, 102));
+  game.drawFastHLine(126, 158, 138, rgb565(96, 99, 102));
+  // Water trough along the barrel's top rim.
+  game.fillRoundRect(128, 94, 134, 18, 8, woodDark);
+  game.fillRoundRect(132, 95, 126, 13, 6, rgb565(55, 45, 35));
+  game.fillRoundRect(136, 98, 118, 7, 3, water);
+  game.drawFastHLine(140, 99, 110, rgb565(115, 204, 216));
 
   // Leafy material drops into the barrel, then the paddle sweeps through it.
   if (frame == 0) {
-    drawFanLeaf(154, 84, 0.28f, -12);
-    drawFanLeaf(166, 82, 0.24f, 18);
+    drawFanLeaf(176, 82, 0.28f, -12);
+    drawFanLeaf(190, 80, 0.24f, 18);
   } else if (frame == 1) {
-    drawFanLeaf(151, 100, 0.26f, -12);
-    drawFanLeaf(166, 102, 0.23f, 18);
+    drawFanLeaf(172, 90, 0.26f, -12);
+    drawFanLeaf(190, 91, 0.23f, 18);
   } else {
-    drawFanLeaf(143, 111, 0.20f, -20);
-    drawFanLeaf(165, 109, 0.19f, 15);
+    drawFanLeaf(166, 97, 0.20f, -20);
+    drawFanLeaf(189, 96, 0.19f, 15);
   }
 
-  const int paddleX[] = {183, 171, 148, 132, 148, 171, 183};
+  // Paddle sweeps the wash; the grower grips partway up the shaft.
+  const int paddleX[] = {228, 212, 192, 176, 192, 212, 228};
   int sweep = paddleX[frame];
-  game.drawLine(231, 62, sweep, 145, woodLight);
-  game.drawLine(230, 62, sweep - 2, 145, woodDark);
-  game.fillTriangle(sweep - 9, 141, sweep + 9, 141, sweep, 159, woodDark);
-  game.fillTriangle(sweep - 6, 142, sweep + 6, 142, sweep, 155, woodLight);
-  drawGrowerWorker(285, 178, 236, 66);   // grower gripping the paddle handle
+  game.drawLine(114, 78, sweep, 150, woodLight);
+  game.drawLine(113, 78, sweep - 2, 150, woodDark);
+  game.fillTriangle(sweep - 9, 146, sweep + 9, 146, sweep, 164, woodDark);
+  game.fillTriangle(sweep - 6, 147, sweep + 6, 147, sweep, 160, woodLight);
+  if (frame == 5) {  // lifting out: drips fall from the paddle head
+    for (int d = 0; d < 4; ++d)
+      game.drawPixel(sweep - 6 + d * 4, 165 + (d % 2) * 3, water);
+  }
 
+  // The grower on a step stool beside the barrel; rear hand on the rim,
+  // front arm bent up to the shaft with a real gripping hand.
+  const uint16_t shirt = rgb565(39, 132, 71);
+  int cx = 80, footY = 190;
+  game.fillRoundRect(cx - 17, footY - 12, 36, 12, 3, wood);
+  game.fillRoundRect(cx - 14, footY - 9, 30, 6, 2, woodLight);
+  int gripX = 114 + (sweep - 114) * 2 / 5;   // partway up the shaft
+  int gripY = 78 + 72 * 2 / 5;
+  game.drawLine(cx - 14, footY - 55, 118, 96, shirt);   // rim hand (behind)
+  game.drawLine(cx - 15, footY - 54, 117, 96, shirt);
+  drawGrippingHand(118, 96, -1);
+  drawGrowerWorker(cx, footY - 12, gripX, gripY);
+
+  // Bubbles and ripples while the paddle works the wash.
   if (frame >= 2 && frame <= 5) {
     for (int ripple = 0; ripple < 3; ++ripple) {
-      int rippleX = 112 + ((ripple * 37 + frame * 11) % 100);
-      int rippleY = 108 + (ripple % 2) * 3;
+      int rippleX = 142 + ((ripple * 37 + frame * 11) % 100);
+      int rippleY = 99 + (ripple % 2) * 3;
       game.drawFastHLine(rippleX, rippleY, 12 + (frame % 3) * 4, rgb565(137, 218, 222));
     }
     for (int bubble = 0; bubble < frame - 1; ++bubble) {
-      int bx = 116 + ((bubble * 27 + frame * 9) % 95);
-      game.drawCircle(bx, 102 - (bubble % 2) * 5, 2, rgb565(164, 225, 224));
+      int bx = 146 + ((bubble * 27 + frame * 9) % 95);
+      game.drawCircle(bx, 93 - (bubble % 2) * 5, 2, rgb565(164, 225, 224));
     }
   }
   if (frame == 6) {
-    game.fillRoundRect(250, 136, 33, 39, 5, rgb565(135, 166, 132));
-    game.drawRoundRect(250, 136, 33, 39, 5, rgb565(198, 219, 171));
-    game.fillRoundRect(258, 129, 17, 9, 2, woodLight);
-    game.fillCircle(266, 151, 7, rgb565(177, 190, 90));
-    game.fillCircle(264, 149, 2, rgb565(221, 226, 141));
-    game.fillCircle(270, 153, 2, rgb565(221, 226, 141));
+    // Pressed hash on the collection plate, pulled out to the side.
+    game.fillRoundRect(24, 136, 44, 42, 5, rgb565(135, 166, 132));
+    game.drawRoundRect(24, 136, 44, 42, 5, rgb565(198, 219, 171));
+    game.fillRoundRect(32, 129, 17, 9, 2, woodLight);
+    game.fillCircle(46, 156, 7, rgb565(177, 190, 90));
+    game.fillCircle(44, 154, 2, rgb565(221, 226, 141));
+    game.fillCircle(50, 158, 2, rgb565(221, 226, 141));
   }
-  game.setTextColor(GOLD, PANEL);
+  game.setTextColor(GOLD, BG);
   if (frame == 6) {
     char batchLabel[30];
     snprintf(batchLabel, sizeof(batchLabel), "%u HASH UNITS READY", lastHarvestUnits);
-    game.drawCentreString(batchLabel, 160, 180, 1);
+    game.drawCentreString(batchLabel, 160, 212, 1);
   } else {
-    game.drawCentreString("LEAVES IN • PADDLE WASH", 160, 180, 1);
+    game.drawCentreString("LEAVES IN - PADDLE WASH", 160, 212, 1);
   }
 }
 
@@ -5657,17 +5735,12 @@ void drawFlowerHarvestFrame(int frame) {
   game.setTextColor(TEXT_MAIN, PANEL);
   game.drawCentreString("FLOWER HARVEST", 160, 46, 2);
 
-  const int plantX[] = {53, 99, 145, 191};
+  static const int plantX[] = {53, 99, 145, 191};
+  static const int potCx[] = {24, 68, 112, 156};   // garden pots: same seeds
   for (int i = frame; i < 4; ++i) {
     int x = plantX[i];
-    int top = 88 + (i % 2) * 8;
-    game.drawFastVLine(x, top + 14, 48, rgb565(35, 104, 48));
-    game.drawLine(x, top + 31, x - 11, top + 23, rgb565(35, 104, 48));
-    game.drawLine(x, top + 37, x + 12, top + 29, rgb565(35, 104, 48));
-    drawFanLeaf(x - 11, top + 23, 0.22f, -28);
-    drawFanLeaf(x + 12, top + 29, 0.22f, 28);
-    drawFanLeaf(x, top + 13, 0.28f, 0);
-    drawBud(x, top + 19, 1.0f);   // a real flower on every standing plant
+    // Exactly the roommate from the small garden (same seed), sized to fit.
+    drawArtPlantT(potCx[i], stageForGrowth(), x, 129 + HEADER_H, 0.75f, false);
     game.fillRoundRect(x - 12, 158, 24, 9, 3, rgb565(91, 49, 33));
   }
   for (int i = 0; i < min(frame, 4); ++i) {   // fresh-cut stumps remain
@@ -5786,41 +5859,75 @@ void animateMoldWarning() {
 }
 
 void drawFlowerTrimFrame(int frame) {
-  game.fillRect(0, HEADER_H, SCREEN_W, NAV_Y - HEADER_H, BG);
-  game.fillRoundRect(13, 38, 294, 158, 10, PANEL);
-  game.drawRoundRect(13, 38, 294, 158, 10, PANEL_LIGHT);
-  game.setTextColor(TEXT_MAIN, PANEL);
-  game.drawCentreString("TRIMMING ROOM", 160, 46, 2);
-  game.fillRoundRect(35, 147, 250, 20, 5, rgb565(113, 73, 48));
-  game.drawFastHLine(42, 149, 236, rgb565(188, 139, 88));
-  // The grower stands at the table (drawn behind it) and trims by hand.
-  int shearX = 90 + frame * 20;
-  drawGrowerWorker(shearX + 58, 178, shearX + 5, 114);
+  // Full-bleed cinematic trim room in the intro's visual language: gradient
+  // wall, warm hanging lamp, deep work bench — the grower works his way down
+  // the bench with the shears held in a properly bent arm.
+  for (int y = 0; y < 196; ++y) {
+    float blend = (float)y / 196.0f;
+    uint8_t v = 30 + (uint8_t)(blend * 26);
+    game.drawBandHLine(0, y, SCREEN_W, rgb565(v - 4, v + 8, v + 4));
+  }
+  game.drawFastHLine(0, 196, SCREEN_W, rgb565(76, 91, 61));
+  game.fillRect(0, 197, SCREEN_W, NAV_Y - 197, rgb565(34, 47, 40));
 
-  // Flower clusters gather on the work surface as the shears move across.
-  int clusterCount = 1 + frame;
-  for (int i = 0; i < clusterCount; ++i) {
-    int x = 74 + (i % 5) * 35;
-    int y = 138 - (i / 5) * 12 - (i % 2) * 3;
-    drawBud(x, y + 8, 1.1f);   // real buds piled on the work surface
+  // Hanging work lamp over the bench: cord, shade, warm bulb.
+  game.fillRect(248, 0, 2, 14, rgb565(57, 66, 60));
+  game.fillTriangle(232, 14, 266, 14, 249, 30, rgb565(57, 66, 60));
+  game.drawFastHLine(232, 13, 35, GOLD);
+  game.fillCircle(249, 16, 3, rgb565(224, 220, 183));
+
+  const int cutX = 60 + frame * 36;
+  const uint16_t woodDark = rgb565(74, 42, 30);
+  const uint16_t wood = rgb565(143, 83, 49);
+  const uint16_t woodLight = rgb565(190, 126, 77);
+  const uint16_t steel = rgb565(208, 218, 218);
+  const uint16_t steelDim = rgb565(185, 195, 196);
+
+  // Shears at the cut point; the bench edge hides the handle grips.
+  game.drawCircle(cutX - 3, 144, 3, steelDim);
+  game.drawCircle(cutX + 3, 144, 3, steelDim);
+  game.drawLine(cutX - 4, 142, cutX - 14, 131, steel);
+  game.drawLine(cutX + 4, 142, cutX + 14, 133, steel);
+
+  // The grower, properly proportioned, tracks the shears down the bench;
+  // rear arm resting on the bench edge, front arm bent to the cut.
+  const int bodyCx = min(286, cutX + 26);
+  drawGrowerWorker(bodyCx, 170, cutX, 146);
+  const uint16_t shirt = rgb565(39, 132, 71);
+  game.drawLine(bodyCx + 8, 130, bodyCx + 20, 148, shirt);
+  game.drawLine(bodyCx + 9, 131, bodyCx + 21, 148, shirt);
+  game.fillCircle(bodyCx + 21, 149, 2,
+                  farmerCharacter == 2 ? rgb565(133, 84, 61) : rgb565(230, 184, 143));
+
+  // Deep work bench drawn over the grower's lower half.
+  game.fillRect(20, 150, 280, 9, woodLight);
+  game.drawFastHLine(20, 150, 280, woodDark);
+  game.fillRect(24, 159, 272, 15, wood);
+  game.fillRect(24, 159, 272, 2, woodDark);
+  for (int x = 44; x < 296; x += 44) game.drawFastVLine(x, 161, 12, woodDark);
+  game.fillRect(36, 174, 8, 22, woodDark);
+  game.fillRect(276, 174, 8, 22, woodDark);
+
+  // Untrimmed buds still standing on the bench, ahead of the shears.
+  for (int i = 0; i < 5; ++i) {
+    int x = 74 + i * 35;
+    if (x > cutX + 12) drawBud(x, 146, 1.1f);
   }
 
-  game.drawCircle(shearX - 5, 116, 5, rgb565(185, 195, 196));
-  game.drawCircle(shearX + 5, 116, 5, rgb565(185, 195, 196));
-  game.drawLine(shearX - 2, 113, shearX + 15, 99, rgb565(208, 218, 218));
-  game.drawLine(shearX + 2, 113, shearX - 14, 99, rgb565(208, 218, 218));
-
+  // Trimmed sugar leaves drift down as the shears move across.
   for (int i = 0; i < frame; ++i) {
-    int leafX = 55 + ((i * 31 + frame * 9) % 206);
-    int leafY = 124 + (i % 3) * 5;
+    int leafX = 40 + ((i * 47 + frame * 13) % 240);
+    int leafY = 112 + (i % 4) * 7;
     drawFanLeaf(leafX, leafY, 0.10f, i * 14);
   }
-  game.setTextColor(GOLD, PANEL);
-  game.drawCentreString(frame >= 5 ? "FLOWER READY FOR MARKET" : "TRIMMING THE HARVEST", 160, 180, 1);
-}
 
+  game.fillRect(0, NAV_Y, SCREEN_W, SCREEN_H - NAV_Y, BG);
+  game.setTextColor(GOLD, BG);
+  game.drawCentreString(frame >= 5 ? "FLOWER READY FOR MARKET" : "TRIMMING THE HARVEST",
+                        160, 212, 1);
+}
 void animateFlowerTrim() {
-  beginCutsceneScene();
+  beginBareHeaderScene();   // full-bleed: the scene owns the whole display
   for (int frame = 0; frame < 6; ++frame) {
     drawFlowerTrimFrame(frame);
     presentFrame();
@@ -6871,7 +6978,6 @@ void updateHarvestLed() {
 }
 
 void initSdAndTouch() {
-#if defined(S3_CYD)
   // Reset the FT6336U, then capacitive touch over I2C (SDA=16, SCL=15).
   pinMode(FT_RST_PIN, OUTPUT);
   digitalWrite(FT_RST_PIN, LOW);
@@ -6880,38 +6986,7 @@ void initSdAndTouch() {
   delay(50);
   pinMode(FT_INT_PIN, INPUT_PULLUP);
   Wire.begin(16, 15);
-
-  // microSD is on its own native SDIO bus — no bus switching needed.
-  SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0, SDMMC_D1, SDMMC_D2, SDMMC_D3);
-  sdMounted = SD_MMC.begin("/sdcard");
-  if (!sdMounted) {
-    delay(250);
-    sdMounted = SD_MMC.begin("/sdcard", true);  // 1-bit fallback
-  }
-  if (sdMounted) Serial.println("microSD mounted; plant art enabled");
-  else Serial.println("microSD not found; using built-in plant drawing");
-#else
-  // Mount the card on the CYD's standard SD SPI pins first. Some cards need
-  // a couple of tries and a slower clock before they cooperate.
-  touchscreenSPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  sdMounted = SD.begin(SD_CS, touchscreenSPI, 12000000);
-  for (int attempt = 0; !sdMounted && attempt < 4; ++attempt) {
-    delay(250);
-    touchscreenSPI.end();
-    touchscreenSPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-    uint32_t clock = attempt < 2 ? 12000000 : 4000000;
-    sdMounted = SD.begin(SD_CS, touchscreenSPI, clock);
-    Serial.printf("SD retry %d @ %u Hz: %s\n", attempt + 1, (unsigned)clock,
-                  sdMounted ? "mounted" : "failed");
-  }
-  if (sdMounted) Serial.println("microSD mounted; plant art enabled");
-  else Serial.println("microSD not found; using built-in plant drawing");
-
-  // Touch has separate board pins, on the same VSPI peripheral.
-  switchToTouchBus();
-  touchscreen.begin(touchscreenSPI);
-  touchscreen.setRotation(1);
-#endif
+  Serial.println("Plants are drawn in code — no SD card needed");
 }
 
 // Deep sleep: near-zero drain (radios off, RAM lost). Wakes as a full
@@ -7053,7 +7128,7 @@ void showBootSplash() {
   // blitted atomically each step - no erase-then-redraw flicker.
   game.fillScreen(TFT_BLACK);
   game.setTextColor(TFT_WHITE, TFT_BLACK);
-  game.drawCentreString("WINFLORIDA", 160, 134, 4);
+  game.drawCentreString("WIN FLORIDA", 160, 134, 4);
   game.setTextColor(0x9EFB, TFT_BLACK);
   game.drawCentreString("GARDEN SIM", 160, 176, 2);
   // Firmware tagline: tiny dim line under the title, handy after OTA swaps.
@@ -7142,10 +7217,6 @@ void setup() {
   Serial.begin(115200);
 #if defined(S3_CYD)
   delay(3000);  // S3 native USB-CDC needs time to enumerate before logging
-  // Default CDC RX ring is 256 bytes — far too small for SDINSTALL file
-  // transfers (bytes get dropped while the card write blocks). 4KB ring
-  // plus the installer's 2KB ack flow control makes overflow impossible.
-  Serial.setRxBufferSize(4096);
 #endif
   Serial.println();
 #if defined(S3_CYD)
@@ -7204,112 +7275,7 @@ void setup() {
   render();
 }
 
-void pollInstallerRequest() {
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\n' || c == '\r') {
-      installerBuf[installerLen] = 0;
-      if (installerLen && strstr(installerBuf, "SDINSTALL")) {
-        sdInstallerMode = true;
-        installerLen = 0;
-        Serial.println("READY");
-        // Park the game visuals and silence the soundtrack while installing.
-        chipToneOff();
-        drumToneOff();
-        activeSong = nullptr;
-        drumPlaying = false;
-        game.fillRect(0, HEADER_H, SCREEN_W, SCREEN_H - HEADER_H, BG);
-        drawHeader();
-        game.setTextColor(GOLD, BG);
-        game.drawCentreString("SD INSTALL MODE", 160, 108, 2);
-        game.setTextColor(TEXT_DIM, BG);
-        game.drawCentreString("Send files over USB; QUIT exits", 160, 140, 1);
-        presentFrame();
-        return;
-      }
-      installerLen = 0;
-      continue;
-    }
-    if (installerLen < (int)sizeof(installerBuf) - 1) installerBuf[installerLen++] = c;
-  }
-}
 
-void handleInstallerSerial() {
-  if (!Serial.available()) return;
-  Serial.setTimeout(250);
-  String cmd = Serial.readStringUntil('\n');
-  cmd.trim();
-  switchToSdBus();
-  if (cmd.startsWith("FILE ")) {
-    int sp = cmd.indexOf(' ', 5);
-    String name = cmd.substring(5, sp);
-    uint32_t size = cmd.substring(sp + 1).toInt();
-    Serial.println("OK");
-    SD.remove(name);
-    File f = SD.open(name, FILE_WRITE);
-    if (!f) { switchToTouchBus(); Serial.println("OPENFAIL"); return; }
-    uint32_t got = 0;
-    uint32_t acked = 0;
-    uint8_t buf[512];
-    unsigned long lastData = millis();
-    while (got < size) {
-      int avail = Serial.available();
-      if (avail <= 0) {
-        // Abort a stalled transfer so QUIT/LIST stay reachable.
-        if (millis() - lastData > 3000UL) { Serial.println("TIMEOUT"); break; }
-        continue;
-      }
-      lastData = millis();
-      int n = avail > 512 ? 512 : avail;
-      n = Serial.readBytes(buf, n);
-      if (n <= 0) continue;
-      if (f.write(buf, n) != (size_t)n) break;
-      got += n;
-      // Flow control: ack every 2KB so the host never outruns the card.
-      while (got - acked >= 2048) { Serial.write('A'); acked += 2048; }
-    }
-    f.close();
-    Serial.println(got == size ? "DONE" : "SHORT");
-  } else if (cmd == "LIST") {
-    File root = SD.open("/");
-    File entry = root.openNextFile();
-    while (entry) {
-      Serial.print(entry.name());
-      Serial.print(' ');
-      Serial.println(entry.size());
-      entry = root.openNextFile();
-    }
-    Serial.println("ENDLIST");
-  } else if (cmd.startsWith("READ ")) {
-    // Stream a file back to the host (for verification and for pulling
-    // art off other boards' cards over USB).
-    String name = cmd.substring(5);
-    name.trim();
-    File f = SD.open(name, FILE_READ);
-    if (!f) {
-      Serial.println("NOFILE");
-    } else {
-      Serial.printf("RC %u\n", (unsigned)f.size());
-      uint8_t buf[512];
-      while (true) {
-        int n = f.read(buf, sizeof(buf));
-        if (n <= 0) break;
-        Serial.write(buf, n);
-      }
-      f.close();
-      Serial.println();
-      Serial.println("ENDDATA");
-    }
-  } else if (cmd.startsWith("DEL ")) {
-    String name = cmd.substring(4);
-    name.trim();
-    Serial.println(SD.remove(name) ? "DELETED" : "NODEL");
-  } else if (cmd == "QUIT") {
-    sdInstallerMode = false;
-    Serial.println("BYE");
-  }
-  switchToTouchBus();
-}
 
 void loop() {
   if (sleepPromptActive) {
@@ -7336,6 +7302,7 @@ void loop() {
     if (touchscreen.tirqTouched() && touchscreen.touched()) {
       while (touchscreen.tirqTouched() && touchscreen.touched()) delay(10);
       sleepPromptActive = false;
+      audioResumeAfterStall();  // back to the game: groove returns clean
       render();
     }
     delay(8);
@@ -7345,6 +7312,7 @@ void loop() {
     delay(35);
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
       sleepPromptActive = true;
+      audioPauseForStall();  // the popup parks the loop; keep DMA fed with silence
       drawSleepPrompt(false);
       return;
     }
@@ -7373,14 +7341,6 @@ void loop() {
       return;  // consume the tap either way so the page under doesn't react
     }
   }
-
-  // SD installer tool: watch for the serial trigger, then service files.
-  if (sdInstallerMode) {
-    handleInstallerSerial();
-    delay(2);
-    return;
-  }
-  pollInstallerRequest();
 
   serviceNearby();
   updateHarvestLed();

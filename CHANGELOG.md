@@ -5,6 +5,25 @@ Each tagged version publishes `.bin` files + `version.txt` on the
 [Releases page](https://github.com/VYBN3D/WinFloridaGardenSim/releases);
 boards update over the air via **Options → CHECK UPDATES → INSTALL**.
 
+## v41 — Plant phenos, cinematic trim, audio balance
+- The vector plants are redesigned: every grow rolls a fresh seed, so each
+  roommate is a distinct pheno — per-plant vigor (short/bushy to tall/lanky),
+  alternating side branches that run longer toward the bottom, crown fan
+  leaves, branch buds and a dominant main cola by harvest
+- The fullscreen plant view now shows the **same seeded plants** as the small
+  garden, magnified — one shared drawing path, so the views always match
+- The flower harvest cutscene shows the roommates themselves (same seeds)
+- The trimming room cutscene is rebuilt full-bleed in the intro's cinematic
+  language: gradient wall, hanging work lamp, deep bench, grower with a
+  properly bent arm on the shears
+- Sound effects (coin blips, pest alert, fanfares) now sit ~6 dB under the
+  theme so they track the music volume knob instead of blasting over it
+- The power popup no longer stutters the soundtrack while it is open
+- The microSD card is fully retired: plants, art and the installer are all in
+  code now; a card slot is no longer needed
+- New "bong hit" sample: lands between the boot chant and the theme, and
+  plays over smoke breaks
+
 ## v40 — Brand picker OTA
 - The WIFI / UPDATES page now has a **GAME BRAND** row: tap it to switch the
   update lane between the rebrands (**WINFLORIDA** and **VYBN**)
