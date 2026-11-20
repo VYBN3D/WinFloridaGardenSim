@@ -412,7 +412,7 @@ void drawGardenActions();
 void waitForCutsceneContinue();
 
 // Firmware identity, shown in the boot log and on the Options page.
-#define FW_VERSION "v39"
+#define FW_VERSION "v40"
 #define FW_BOARD    "S28"
 #define FW_DATE    "Nov 20"
 #define FW_VERSION_FULL FW_VERSION "-" FW_BOARD
@@ -3107,6 +3107,36 @@ static const char *OTA_RELEASE_BASE =
     "https://github.com/VYBN3D/WinFloridaGardenSim/releases/latest/download/";
 static const char *OTA_BIN_NAME = "WinFloridaGardenSim_S28.ino.bin";
 
+// ---- Brand lanes: CHECK UPDATES can install any sibling rebrand ----------
+struct OtaBrand {
+  const char *label;   // shown on the brand picker
+  const char *base;    // releases/latest/download/ base URL
+  const char *s3Bin;   // 4-inch S3 asset
+  const char *s28Bin;  // 2.8-inch S3 asset
+};
+static const OtaBrand otaBrands[] = {
+  {"WINFLORIDA", "https://github.com/VYBN3D/WinFloridaGardenSim/releases/latest/download/",
+   "WinFloridaGardenSim_S3.ino.bin", "WinFloridaGardenSim_S28.ino.bin"},
+  {"VYBN", "https://github.com/VYBN3D/VYBNGardenSim/releases/latest/download/",
+   "VYBNGardenSim_S3.ino.bin", "VYBNGardenSim_S28.ino.bin"},
+};
+static const uint8_t OTA_BRAND_COUNT =
+    sizeof(otaBrands) / sizeof(otaBrands[0]);
+static const uint8_t otaBrandHome = 0;   // this fork's own brand lane
+uint8_t otaBrandIndex = 0;              // brand selected on the OTA page
+
+static const char *otaSelectedBase() { return otaBrands[otaBrandIndex].base; }
+static const char *otaSelectedBin() {
+  const OtaBrand &b = otaBrands[otaBrandIndex];
+  return strcmp(FW_BOARD, "S28") == 0 ? b.s28Bin : b.s3Bin;
+}
+// Installing a different brand is always offered; the home brand only offers
+// INSTALL once its version.txt differs from this build.
+static bool otaInstallable() {
+  return otaLatest[0] && (otaBrandIndex != otaBrandHome ||
+                          strcmp(otaLatest, FW_VERSION) != 0);
+}
+
 static bool wifiConnected() { return WiFi.status() == WL_CONNECTED; }
 
 static void otaRestoreRadio() {
@@ -3173,7 +3203,7 @@ static void otaCheckUpdate() {
   tls.setTimeout(12000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(12000);
-  if (!http.begin(tls, String(OTA_RELEASE_BASE) + "version.txt")) {
+  if (!http.begin(tls, String(otaSelectedBase()) + "version.txt")) {
     snprintf(otaStatus, sizeof(otaStatus), "Update check failed");
   } else {
     int code = http.GET();
@@ -3181,10 +3211,11 @@ static void otaCheckUpdate() {
       String body = http.getString();
       body.trim();
       strlcpy(otaLatest, body.c_str(), sizeof(otaLatest));
-      if (!strcmp(otaLatest, FW_VERSION))
+      if (otaBrandIndex == otaBrandHome && !strcmp(otaLatest, FW_VERSION))
         snprintf(otaStatus, sizeof(otaStatus), "Up to date (%s)", FW_VERSION);
       else
-        snprintf(otaStatus, sizeof(otaStatus), "UPDATE READY: %s", otaLatest);
+        snprintf(otaStatus, sizeof(otaStatus), "UPDATE READY: %s %s",
+                 otaBrands[otaBrandIndex].label, otaLatest);
     } else {
       snprintf(otaStatus, sizeof(otaStatus), "Update check failed (HTTP %d)", code);
     }
@@ -3212,7 +3243,7 @@ static void otaInstallUpdate() {
   tls.setTimeout(15000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(30000);
-  if (!http.begin(tls, String(OTA_RELEASE_BASE) + OTA_BIN_NAME)) {
+  if (!http.begin(tls, String(otaSelectedBase()) + otaSelectedBin())) {
     snprintf(otaStatus, sizeof(otaStatus), "Download failed");
     otaBusy = false;
     return;
@@ -3274,16 +3305,22 @@ static void drawOtaPage() {
   OTA_GFX.drawCentreString(line, 160, 88, 1);
   drawButton(5, 108, 152, 34, "WIFI LOGIN", PANEL_LIGHT);
   drawButton(163, 108, 152, 34, "CHECK UPDATES", PANEL_LIGHT);
-  OTA_GFX.setTextColor(otaLatest[0] && strcmp(otaLatest, FW_VERSION) ? GOLD : TEXT_DIM, BG);
-  OTA_GFX.drawCentreString(otaStatus, 160, 150, 1);
-  if (otaLatest[0] && strcmp(otaLatest, FW_VERSION)) {
+  // Brand lane: pick which rebrand's releases CHECK UPDATES / INSTALL use.
+  char brandLine[44];
+  snprintf(brandLine, sizeof(brandLine), "GAME BRAND: %s - TAP TO SWITCH",
+           otaBrands[otaBrandIndex].label);
+  drawButton(5, 146, 310, 22, brandLine, ACCENT_DARK, TFT_WHITE);
+  OTA_GFX.setTextColor(otaInstallable() ? GOLD : TEXT_DIM, BG);
+  OTA_GFX.drawCentreString(otaStatus, 160, 172, 1);
+  if (otaInstallable()) {
     if (otaBusy) {
       // Install running: the button dims and reads DOWNLOADING so a second
       // tap can't restart the flash.
-      drawButton(5, 160, 310, 36, "DOWNLOADING ...", PANEL_LIGHT, TEXT_DIM);
+      drawButton(5, 178, 310, 28, "DOWNLOADING ...", PANEL_LIGHT, TEXT_DIM);
     } else {
-      snprintf(line, sizeof(line), "INSTALL %s AND REBOOT", otaLatest);
-      drawButton(5, 160, 310, 36, line, ACCENT_DARK, TFT_WHITE);
+      snprintf(line, sizeof(line), "INSTALL %s %s AND REBOOT",
+               otaBrands[otaBrandIndex].label, otaLatest);
+      drawButton(5, 178, 310, 28, line, ACCENT_DARK, TFT_WHITE);
     }
   }
 }
@@ -3532,8 +3569,13 @@ static void touchOtaPage(int x, int y) {
   } else if (y >= 108 && y < 142) {
     otaCheckUpdate();
     render();
-  } else if (y >= 160 && y < 196 && !otaBusy &&
-             otaLatest[0] && strcmp(otaLatest, FW_VERSION)) {
+  } else if (y >= 146 && y < 168) {
+    otaBrandIndex = (uint8_t)((otaBrandIndex + 1) % OTA_BRAND_COUNT);
+    otaLatest[0] = '\0';             // re-check against the new brand
+    snprintf(otaStatus, sizeof(otaStatus), "Brand: %s - tap CHECK UPDATES",
+             otaBrands[otaBrandIndex].label);
+    render();
+  } else if (y >= 178 && y < 206 && !otaBusy && otaInstallable()) {
     otaInstallUpdate();
     render();
   }
@@ -7071,7 +7113,7 @@ void setup() {
 #endif
   Serial.println();
 #if defined(S3_CYD)
-  Serial.printf("[BUILD] %s: WinFlorida rebrand\n", FW_VERSION_FULL);
+  Serial.printf("[BUILD] %s: brand picker OTA\n", FW_VERSION_FULL);
 #else
   Serial.println("[BUILD] v9: pedro + giant card select + sd installer + easy-first catalog");
 #endif

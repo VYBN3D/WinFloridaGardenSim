@@ -24,9 +24,6 @@ jobs:
             fqbn: "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
           - sketch: WinFloridaGardenSim_S28
             fqbn: "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
-          - sketch: WinFloridaGardenSim
-            fqbn: "esp32:esp32:esp32:PartitionScheme=default"
-            classic: true
     steps:
       - uses: actions/checkout@v4
 
@@ -43,9 +40,6 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           arduino-cli lib install "TFT_eSPI@2.5.43" "NimBLE-Arduino@1.4.0" "Adafruit NeoPixel@1.15.5" "XPT2046_Touchscreen@1.4"
 
-      - name: Apply classic CYD panel config (User_Setup.h)
-        if: matrix.classic
-        run: cp firmware/User_Setup_classic.h ~/Arduino/libraries/TFT_eSPI/User_Setup.h
 
       - name: Compile ${{ matrix.sketch }}
         run: |
@@ -87,4 +81,4 @@ jobs:
           files: |
             bins/**/*.bin
             bins/version.txt
-          body: "OTA firmware for all three boards (4-inch S3, 2.8-inch S3, classic CYD). Devices check version.txt against their build tag and fetch the matching .bin."
+          body: "OTA firmware for the 4-inch S3 and 2.8-inch S3 boards. Devices check version.txt against their build tag and fetch the matching .bin."

@@ -5,6 +5,16 @@ Each tagged version publishes `.bin` files + `version.txt` on the
 [Releases page](https://github.com/VYBN3D/WinFloridaGardenSim/releases);
 boards update over the air via **Options → CHECK UPDATES → INSTALL**.
 
+## v40 — Brand picker OTA
+- The WIFI / UPDATES page now has a **GAME BRAND** row: tap it to switch the
+  update lane between the rebrands (**WINFLORIDA** and **VYBN**)
+- CHECK UPDATES reads the selected brand's repo; INSTALL flashes that
+  brand's firmware for your board and reboots into it — one board can hop
+  between brands entirely over the air
+- Installing a different brand is always offered; your own brand lane only
+  offers INSTALL when a newer build exists
+- The classic CYD build is retired (sketch + CI entry removed)
+
 ## v39 — WinFlorida rebrand
 - The game is rebranded: **WinFlorida Garden Sim** (formerly Curaleaf Garden)
   — boot splash, header bar, grower ID card brand and all comments updated
