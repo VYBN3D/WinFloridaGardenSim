@@ -50,7 +50,7 @@ jobs:
             cp firmware/build_opt_${{ matrix.sketch }}.h firmware/work/${{ matrix.sketch }}/build_opt.h
           fi
           # PCM sample voices (boot chant + theme loop) live in headers.
-          cp firmware/boot_chant.h firmware/theme_loop.h firmware/work/${{ matrix.sketch }}/ 2>/dev/null || true
+          cp firmware/boot_chant.h firmware/theme_loop.h firmware/bong_hit.h firmware/work/${{ matrix.sketch }}/ 2>/dev/null || true
           arduino-cli compile \
             --fqbn "${{ matrix.fqbn }}" \
             --build-path firmware/build/${{ matrix.sketch }} \
