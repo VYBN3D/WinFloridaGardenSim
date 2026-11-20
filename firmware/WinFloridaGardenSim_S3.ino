@@ -397,7 +397,7 @@ void drawGardenActions();
 void waitForCutsceneContinue();
 
 // Firmware identity, shown in the boot log and on the Options page.
-#define FW_VERSION "v41"
+#define FW_VERSION "v42"
 #define FW_BOARD    "S3"
 #define FW_DATE    "Nov 20"
 #define FW_VERSION_FULL FW_VERSION "-" FW_BOARD
@@ -2311,17 +2311,18 @@ void drawArtBud(int x, int y, float s, int pistils) {
                   max(1, (int)(1.8f * s)), calyx);
   game.fillCircle(x - (int)(2 * s), y + (int)(2.2f * s) + HEADER_H,
                   max(1, (int)(1.4f * s)), calyx);
-  // Fuzzy sage/gold speckles so the lump reads as frosty cannabis.
+  // Fuzzy sage/gold speckles hugging the bud surface so the lump reads as
+  // frosty cannabis without stray dots floating in the air around it.
   static const int8_t fz[12][2] = {{-3, -2}, {2, -3}, {4, 0},  {-4, 1},
                                    {1, 2},   {-2, 3}, {3, 3},  {0, -4},
                                    {-5, -1}, {5, 2},  {-1, -3}, {2, 4}};
   for (int i = 0; i < pistils * 2 && i < 12; ++i) {
     uint16_t c = (i % 3) ? fuzz : ((i % 2) ? gold : pil);
-    game.drawPixel(x + (int)(fz[i][0] * s / 1.2f),
-                   y + (int)(fz[i][1] * s / 1.2f) + HEADER_H, c);
+    game.drawPixel(x + (int)(fz[i][0] * s * 0.7f),
+                   y + (int)(fz[i][1] * s * 0.7f) + HEADER_H, c);
     if (i % 4 == 0)
-      game.drawPixel(x + (int)(fz[i][0] * s / 1.2f) + 1,
-                     y + (int)(fz[i][1] * s / 1.2f) - 1 + HEADER_H, pilW);
+      game.drawPixel(x + (int)(fz[i][0] * s * 0.7f) + 1,
+                     y + (int)(fz[i][1] * s * 0.7f) - 1 + HEADER_H, pilW);
   }
   for (int i = 0; i < pistils; ++i) {
     int px = x + ((i * 7) % (2 * r1)) - r1;
@@ -2394,7 +2395,7 @@ static void drawArtPlantT(int cx, int stage, int screenX, int soilScreenY,
 
   const int soil = 129;
   const int nominal = stage == 0 ? 16 : stage == 1 ? 28 : stage == 2 ? 42
-                      : stage == 3 ? 60 : 80;
+                      : stage == 3 ? 64 : 86;
   const int topY = soil - nominal * vigorX100 / 100 +
                    (int)(variantNext(rs) % 5) - 2;
 
@@ -2412,7 +2413,8 @@ static void drawArtPlantT(int cx, int stage, int screenX, int soilScreenY,
   // and from flowering on, its own bud.
   const int fingers = stage == 0 ? 3 : stage == 1 ? 5 : 7;
   const int branches = stage == 0 ? 0 : stage == 1 ? 2
-                       : 3 + (stretch >= 2 ? 1 : 0);
+                       : stage == 2 ? 3 + (stretch >= 2 ? 1 : 0)
+                                    : 4 + (stretch >= 2 ? 1 : 0);
   for (int i = 0; i < branches; ++i) {
     const int sgn = (i & 1) ? 1 : -1;              // alternate sides
     const int ys = soil - (i + 1) * (soil - topY) / (branches + 1);
@@ -2431,11 +2433,15 @@ static void drawArtPlantT(int cx, int stage, int screenX, int soilScreenY,
                       sgn * (28 + (int)(variantNext(rs) % 15)),
                       fingers, tint);
     if (stage >= 3) {
-      float bs = (stage == 4 ? 1.05f : 0.75f) *
+      // Every branch tip ends in a proper spear cola: buds stacked up the
+      // branch, biggest at the base, tapering upward.
+      float bs = (stage == 4 ? 1.00f : 0.72f) *
                  (0.85f + (variantNext(rs) % 30) / 100.0f);
-      drawArtBud(zX(tipX), zY(tipY - 2) - HEADER_H, bs * sc, stage == 4 ? 6 : 4);
-      if (stage == 4)
-        drawArtBud(zX(tipX - sgn * 3), zY(tipY + 3) - HEADER_H, bs * 0.75f * sc, 5);
+      const int links = stage == 4 ? 3 : 2;
+      for (int b = 0; b < links; ++b) {
+        drawArtBud(zX(tipX + sgn * b), zY(tipY - 2 - b * 5) - HEADER_H,
+                   bs * (1.0f - b * 0.22f) * sc, stage == 4 ? 6 : 4);
+      }
     }
   }
 
@@ -2452,26 +2458,14 @@ static void drawArtPlantT(int cx, int stage, int screenX, int soilScreenY,
                       (int)(variantNext(rs) % 9) - 4, fingers, tint);
   }
   if (stage >= 3) {
-    // Dominant main cola: stacked buds tapering up the stem tip.
+    // Dominant main cola: a fat spear of stacked buds running up the stem tip,
+    // biggest at the base and tapering to a crown bud above the leaves.
     const int mj = (int)(variantNext(rs) % 3);
-    drawArtBud(zX(cx + lean), zY(topY + 8 + mj) - HEADER_H,
-               (stage == 4 ? 1.45f : 1.0f) * sc, 7);
-    drawArtBud(zX(cx + lean - 1), zY(topY + 2 + mj) - HEADER_H,
-               (stage == 4 ? 1.20f : 0.85f) * sc, 6);
-    drawArtBud(zX(cx + lean + 1), zY(topY - 4 + mj) - HEADER_H,
-               (stage == 4 ? 0.95f : 0.70f) * sc, 6);
-  }
-  if (stage == 4) {
-    // White pistil flecks scattered across the whole canopy.
-    static const int8_t sp[16][2] = {{16, 66}, {30, 66}, {12, 78}, {36, 78},
-                                     {20, 58}, {27, 58}, {16, 90}, {31, 90},
-                                     {12, 102}, {35, 102}, {18, 72}, {29, 72},
-                                     {14, 84}, {33, 84}, {20, 96}, {27, 96}};
-    for (int i = 0; i < 16; ++i) {
-      game.drawPixel(zX(cx - 23 + sp[i][0]), zY(sp[i][1]),
-                     rgb565(224, 220, 183));
-      game.drawPixel(zX(cx - 23 + sp[i][0]) + 1, zY(sp[i][1]) - 1,
-                     rgb565(205, 201, 157));
+    const int links = stage == 4 ? 4 : 3;
+    for (int b = 0; b < links; ++b) {
+      const float s = (stage == 4 ? 1.30f : 0.95f) * (1.0f - b * 0.16f);
+      drawArtBud(zX(cx + lean + ((b & 1) ? 1 : -1)),
+                 zY(topY + 8 + mj - b * 6) - HEADER_H, s * sc, 7 - b);
     }
   }
 }
@@ -5768,7 +5762,9 @@ void drawFlowerHarvestFrame(int frame) {
   // The remaining roommates, standing in their pots on the floor.
   for (int i = frame; i < 4; ++i) {
     int x = plantX[i];
-    drawArtPlantT(potCx[i], stageForGrowth(), x, 185, 0.75f, true);
+    // finishHarvest() resets growth before this cutscene runs, so stageForGrowth()
+    // would draw seedlings; a flower harvest is always a fully mature plant.
+    drawArtPlantT(potCx[i], 4, x, 185, 0.75f, true);
   }
 
   // The grower works his way down the row, shears in a bent arm.
@@ -7149,6 +7145,9 @@ void sleepUntilBootWake() {
   startNearbyRadio();
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
   audioLastVol = 255;  // make the next pump re-apply codec volume + amp
+  // The prompt's audioPauseForStall() killed the theme stream; restart it,
+  // or waking from sleep leaves the garden silent until a bong hit happens.
+  if (musicVolume && !pcmStream) pcmStart(PCM_THEME);  // groove returns on wake
   previousTouch = false;
   lastGameTick = millis();
   lastFarmerVisitAt = millis();
@@ -7346,6 +7345,10 @@ void loop() {
       sleepPromptActive = true;
       audioPauseForStall();  // the popup parks the loop; keep DMA fed with silence
       drawSleepPrompt(false);
+      // The press that opened this popup must not count as the popup's own
+      // "quick press = sleep": wait for the finger to lift so the prompt's
+      // press timing starts on a genuinely fresh press (or a screen tap).
+      while (digitalRead(BOOT_BUTTON_PIN) == LOW) delay(10);
       return;
     }
   }

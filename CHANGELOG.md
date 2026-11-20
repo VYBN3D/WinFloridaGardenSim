@@ -5,6 +5,23 @@ Each tagged version publishes `.bin` files + `version.txt` on the
 [Releases page](https://github.com/VYBN3D/WinFloridaGardenSim/releases);
 boards update over the air via **Options → CHECK UPDATES → INSTALL**.
 
+## v42 — Reference-style colas, harvest fix, sleep audio fix
+- Mature plants redesigned around the Weed Farmer reference: a fat spear
+  main cola (4 stacked buds) runs up the stem tip, every branch offshoot
+  ends in its own 3-bud spear cola, and mature plants stand taller
+  (stage 3/4 height bumped) with 4-5 branches instead of 3
+- Removed the floating white pistil flecks that scattered random dots
+  across the canopy and mid-air; bud frost speckles now hug the buds
+- Flower harvest cutscene: the standing plants now draw at full maturity —
+  finishHarvest() reset growth to 0 before the animation ran, so they
+  rendered as seedlings
+- Power popup no longer sleeps on the click that opened it: the popup
+  waits for the BOOT button to be released before timing presses, so a
+  single click always shows the quick-press/hold options
+- Waking from sleep mode restarts the garden theme: the popup had killed
+  the PCM theme stream and the wake path never restarted it, so the
+  garden sometimes stayed silent until the next bong hit
+
 ## v41 — Plant phenos, cinematic trim, audio balance
 - The vector plants are redesigned: every grow rolls a fresh seed, so each
   roommate is a distinct pheno — per-plant vigor (short/bushy to tall/lanky),
