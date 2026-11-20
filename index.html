@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>WinFlorida Garden Sim — Web</title>
+<style>
+  html,body{margin:0;padding:0;background:#0b0f0d;height:100%;overscroll-behavior:none}
+  body{display:flex;align-items:center;justify-content:center;flex-direction:column;
+       font-family:monospace;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+  #wrap{width:100%;max-width:560px;padding:6px;box-sizing:border-box}
+  canvas{width:100%;display:block;image-rendering:pixelated;image-rendering:crisp-edges;
+         border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.6)}
+  #hint{color:#4d6b5d;font-size:11px;text-align:center;margin-top:6px;letter-spacing:.5px}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="screen" width="320" height="240"></canvas></div>
+<div id="hint">WIN FLORIDA GARDEN SIM · WEB EDITION · GROWS IN REAL TIME</div>
+<script>
+"use strict";
+// ================= WinFlorida Garden Sim — web port =========================
+// Faithful port of the ESP32 firmware's garden core: same vector plant art,
+// wall-clock growth (30 s ticks), hydration drain, wilt-timer death, pests,
+// watering, harvest and strain market. Saves to localStorage and catches up
+// on missed ticks like the board does through sleep.
+const SCREEN_W=320, SCREEN_H=240, HEADER_H=28, NAV_Y=207, NAV_H=33, ACTION_Y=174, ART_W=178;
+const cv=document.getElementById('screen'), ctx=cv.getContext('2d');
+const TAU=Math.PI*2;
+
+function rgb565(a,b,c){
+  if(b===undefined){const v=a,r=(v>>11)&31,g=(v>>5)&63,bl=v&31;
+    return `rgb(${Math.round(r*255/31)},${Math.round(g*255/63)},${Math.round(bl*255/31)})`;}
+  return `rgb(${a},${b},${c})`;}
+const C=v=>typeof v==='string'?v:rgb565(v);
+const BG=0x1082, PANEL=0x2124, PANEL_LIGHT=0x4208, TEXT_MAIN=0xD6BA, TEXT_DIM=0x630C,
+      GOLD=0xFDC0, RED=0xA000, ACCENT=0x35BE, ACCENT_DARK=0x2C64, WHITE='#fff';
+
+// ---- drawing primitives (mirror the TFT_eSPI calls used by the firmware) ----
+function fr(x,y,w,h,c){ctx.fillStyle=C(c);ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));}
+function frr(x,y,w,h,r,c){fr(x,y,w,h,c); /* simple corner approximation */
+  ctx.fillStyle=C(c);roundPath(x,y,w,h,r);ctx.fill();}
+function roundPath(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function drr(x,y,w,h,r,c){ctx.strokeStyle=C(c);ctx.lineWidth=1;roundPath(x+.5,y+.5,w-1,h-1,r);ctx.stroke();}
+function ftri(x1,y1,x2,y2,x3,y3,c){ctx.fillStyle=C(c);ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.lineTo(x3,y3);ctx.closePath();ctx.fill();}
+function fcir(x,y,r,c){ctx.fillStyle=C(c);ctx.beginPath();ctx.arc(x,y,r,0,TAU);ctx.fill();}
+function dln(x1,y1,x2,y2,c){ctx.strokeStyle=C(c);ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x1+.5,y1+.5);ctx.lineTo(x2+.5,y2+.5);ctx.stroke();}
+function dpx(x,y,c){fr(x,y,1,1,c);}
+function fhline(x,y,w,c){fr(x,y,w,1,c);}
+function fvline(x,y,h,c){fr(x,y,1,h,c);}
+function txt(s,x,y,color,size,center,right){
+  ctx.font=(size===2?'bold 12px':'bold 8px')+' "Courier New",monospace';
+  ctx.textBaseline='top';ctx.fillStyle=C(color);
+  const w=ctx.measureText(s).width;
+  ctx.fillText(s,Math.round(center?x-w/2:(right?x-w:x)),Math.round(y+1));}
+function centre(s,x,y,c,sz){txt(s,x,y,c,sz||2,true,false);}
+
+// ============================ game state ====================================
+const STRAINS=["Northern Lights","Blue Dream","Banana Papaya","Superbuff Cherry","Jack Herer",
+ "Granddaddy Purple","White Widow","Blue Lobster","OG Kush","Sour Diesel","Gelato",
+ "Titan Express","Zesty Garlic Cookies","Moon Beam Gelato","Toad Venom","Foreign Kushmints"];
+const PACE_MOD=[1,0,0,0,0,0,0,-1,-1,-1,-1,-1,-1,-1,-2,-2];
+const H2O_NEED=[14,18,18,18,18,18,18,24,24,24,24,24,24,24,32,32];
+const SEED_PRICE=[8,12,12,12,12,12,12,18,18,18,18,18,18,18,30,30];
+const THIRSTY=new Set([0,2,7,8,9]);
+const DRY_LIMIT=20, WATER_DRAIN=3, THIRSTY_EXTRA=2, WATER_AMOUNT=32, SEC_TICK=30;
+const START_CREDITS=20;
+let G=null, page='GARDEN', splashT=performance.now(), sleepMode=false;
+let lastFrame=0;
+
+function newGame(){
+  return {credits:START_CREDITS, water:3, care:2, unlocked:4, strain:0,
+    active:false, growth:0, hydration:72, vigor:82, pest:0, dry:0,
+    epoch:Math.floor(Date.now()/1000), stash:0, stashQ:0, harvests:0, speed:0};
+}
+function save(){G.epoch=Math.floor(Date.now()/1000);localStorage.setItem('wfg-web',JSON.stringify(G));}
+function load(){try{const s=localStorage.getItem('wfg-web');G=s?JSON.parse(s):newGame();}catch(e){G=newGame();}}
+
+// seed per pot like the firmware: plantVariant ^ pot position
+function variantFor(){return (G.harvests*2654435761 ^ (G.strain*97+7))>>>0;}
+function vNext(rs){rs.v^=rs.v<<13;rs.v^=rs.v>>>17;rs.v^=rs.v<<5;rs.v>>>=0;return rs.v;}
+function stageFor(g){return g<12?0:g<32?1:g<58?2:g<82?3:4;}
+
+// ============================ growth engine =================================
+function gameTick(dormant){
+  if(!G.active)return;
+  if(!dormant){
+    let use=WATER_DRAIN+(THIRSTY.has(G.strain)?THIRSTY_EXTRA:0);
+    G.hydration=Math.max(0,G.hydration-use);
+    if(G.vigor>0)G.vigor--;
+    if(G.hydration<20){G.dry++;if(G.dry>=DRY_LIMIT){plantLost('DEHYDRATED');return;}}
+    else G.dry=0;
+    if(G.pest===0&&G.growth>12&&Math.random()<0.03)G.pest=1+Math.floor(Math.random()*3),G.pestSev=5;
+    if(G.pest>0){G.pestSev=Math.min(100,(G.pestSev||5)+7);
+      if(G.pestSev>=35&&G.vigor>3)G.vigor-=Math.min(3,1+Math.floor(G.pestSev/34));
+      const t=Math.floor(G.pestSev/25);if(t)G.hydration=Math.max(0,G.hydration-t);}
+    if(G.hydration===0){G.vigor=Math.max(0,G.vigor-6);if(G.vigor===0){plantLost('BONE DRY');return;}}
+  }
+  const need=H2O_NEED[G.strain];
+  if(G.hydration>=need&&G.vigor>=18&&G.growth<100&&(G.pestSev||0)<85){
+    let pace=1+PACE_MOD[G.strain];pace=Math.max(1,pace);
+    G.growth=Math.min(100,G.growth+pace);
+  }
+  G.epoch=Math.floor(Date.now()/1000);
+}
+function plantLost(reason){
+  G.active=false;G.growth=0;G.hydration=72;G.vigor=82;G.pest=0;G.pestSev=0;G.dry=0;
+  save();lostReason=reason;lostT=performance.now();
+}
+let lostReason='',lostT=0;
+function catchUp(){
+  const sec=[30,10,4][G.speed];
+  const now=Math.floor(Date.now()/1000);
+  let ticks=Math.floor((now-G.epoch)/sec);
+  if(ticks>0){if(ticks>2880)ticks=2880;
+    for(let i=0;i<ticks;i++){gameTick(true);G.epoch+=sec;}}
+}
+function water(){
+  if(!G.active||G.water<=0)return;
+  if(G.hydration>70&&G.hydration>=H2O_NEED[G.strain]&&G.vigor>60)return; // would drown
+  G.hydration=Math.min(100,G.hydration+WATER_AMOUNT);G.water--;blip(660);save();
+}
+function treat(){if(!G.active||G.pest===0||G.care<=0)return;G.pest=0;G.pestSev=0;G.care--;blip(880);save();}
+function harvest(){
+  if(!G.active||G.growth<100)return;
+  const units=4, q=G.vigor;
+  G.stash+=units;G.stashQ=Math.floor(((G.stashQ*0.6)+(q*0.4)));
+  G.active=false;G.growth=0;G.hydration=72;G.vigor=82;G.pest=0;G.pestSev=0;G.dry=0;
+  G.harvests++;if(G.unlocked<16)G.unlocked=Math.min(16,4+G.harvests);
+  fanfare();save();page='STASH';
+}
+function sell(){
+  if(G.stash<=0)return;
+  G.credits+=G.stash*(8+Math.floor(G.stashQ/12));
+  G.stash=0;G.stashQ=0;blip(990);save();
+}
+function buyWater(){if(G.credits<5)return;G.credits-=5;G.water=Math.min(99,G.water+3);blip(700);save();}
+function buyCare(){if(G.credits<7)return;G.credits-=7;G.care=Math.min(99,G.care+1);blip(700);save();}
+function buySeed(s){
+  if(G.credits<SEED_PRICE[s]||G.active)return;
+  G.credits-=SEED_PRICE[s];G.strain=s;G.active=true;G.growth=0;G.hydration=72;G.vigor=82;
+  G.pest=0;G.pestSev=0;G.dry=0;G.epoch=Math.floor(Date.now()/1000);
+  blip(880);save();page='GARDEN';
+}
+
+// ============================ audio (tiny) ==================================
+let AC=null;
+function blip(f){try{AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+  const o=AC.createOscillator(),g=AC.createGain();o.type='square';o.frequency.value=f;
+  g.gain.value=.04;o.connect(g);g.connect(AC.destination);o.start();o.stop(AC.currentTime+.08);}catch(e){}}
+function fanfare(){try{AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+  [523,659,784,1047].forEach((f,i)=>setTimeout(()=>blip(f),i*110));}catch(e){}}
+
+// ============================ plant art (ported) ============================
+const SI= Math.sin, CO=Math.cos;
+function leaflet(bx,by,tx,ty,width,dark,light,vein){
+  const dx=tx-bx,dy=ty-by,len=Math.hypot(dx,dy);if(len<1)return;
+  const px=-dy/len,py=dx/len,mx=(bx+tx)/2,my=(by+ty)/2;
+  const lx=mx+px*width*.5,ly=my+py*width*.5,rx=mx-px*width*.5,ry=my-py*width*.5;
+  ftri(bx,by,lx,ly,tx,ty,dark);ftri(bx,by,tx,ty,rx,ry,light);dln(bx,by,tx,ty,vein);
+  for(let n=1;n<=2;++n){const t=.34+n*.19;
+    let ex=bx+dx*t+px*width*.34,ey=by+dy*t+py*width*.34;dln(ex,ey,ex+px*2,ey+py*2,vein);
+    ex=bx+dx*t-px*width*.34;ey=by+dy*t-py*width*.34;dln(ex,ey,ex-px*2,ey-py*2,vein);}
+}
+const H=HEADER_H;
+function fanLeafTinted(x,y,sc,tilt,fingers,tint){
+  const P=[[[20,76,35],[38,130,58],[78,166,75],[148,194,111]],
+           [[14,64,40],[30,118,66],[66,150,86],[136,184,124]],
+           [[26,84,28],[52,142,42],[96,180,62],[168,204,102]],
+           [[16,74,58],[34,124,80],[70,158,102],[140,190,132]]][tint&3];
+  const dark=C(rgb565(...P[0])),mid=C(rgb565(...P[1])),light=C(rgb565(...P[2])),vein=C(rgb565(...P[3]));
+  const o7=[-66,-44,-22,0,22,44,66],l7=[19,27,34,43,34,27,19],
+        o5=[-44,-22,0,22,44],l5=[27,34,43,34,27],o3=[-22,0,22],l3=[34,43,34];
+  const offs=fingers<=3?o3:fingers===5?o5:o7,lens=fingers<=3?l3:fingers===5?l5:l7,count=offs.length;
+  for(let i=0;i<count;++i){
+    const a=(tilt+offs[i])*Math.PI/180,len=lens[i]*sc;
+    const tx=x+SI(a)*len,ty=y-CO(a)*len,mid=count>>1;
+    let width=Math.max(3,Math.round((i===mid?9:(i===mid-1||i===mid+1?7:5))*sc));
+    leaflet(x,y,tx,ty,width,mid,light,vein);
+    if(i===mid)dln(x,y,tx,ty,mid);
+  }
+}
+function artBud(x,y,s,pistils){
+  const calyx=rgb565(31,78,39),m=rgb565(94,128,66),lite=rgb565(112,159,91),
+        fz=rgb565(119,131,108),gold=rgb565(176,196,124),pil=rgb565(205,201,157),pilW=rgb565(224,220,183);
+  let r1=Math.max(2,Math.floor(3.4*s));
+  fcir(x,y+H,r1,m);
+  fcir(x-r1+1,y-1.5*s+H,Math.max(1,Math.floor(2.2*s)),lite);
+  fcir(x+1.5*s,y-2*s+H,Math.max(1,Math.floor(1.6*s)),m);
+  fcir(x+s,y+1.5*s+H,Math.max(1,Math.floor(1.8*s)),calyx);
+  fcir(x-2*s,y+2.2*s+H,Math.max(1,Math.floor(1.4*s)),calyx);
+  const f=[[-3,-2],[2,-3],[4,0],[-4,1],[1,2],[-2,3],[3,3],[0,-4],[-5,-1],[5,2],[-1,-3],[2,4]];
+  for(let i=0;i<pistils*2&&i<12;++i){
+    const c=(i%3)?fz:((i%2)?gold:pil);
+    dpx(x+f[i][0]*s*.7,y+f[i][1]*s*.7+H,c);
+    if(i%4===0)dpx(x+f[i][0]*s*.7+1,y+f[i][1]*s*.7-1+H,pilW);}
+  for(let i=0;i<pistils;++i){
+    const px=x+((i*7)%(2*r1))-r1,py=y-r1+1+(i%4);
+    dpx(px,py+H,(i%2)?pil:gold);dpx(px+1,py-1+H,(i%3===0)?pilW:lite);}
+}
+function vNextObj(seed){return {v:seed>>>0};}
+let zX0=0,zSoilY=0,zSc=1,zRef=0;
+const zX=x=>zX0+Math.round((x-zRef)*zSc), zY=y=>zSoilY+Math.round((y-129)*zSc);
+function zBranch(x1,y1,x2,y2,c){dln(zX(x1),zY(y1),zX(x2),zY(y2),c);dln(zX(x1)+1,zY(y1),zX(x2)+1,zY(y2),c);
+  if(zSc>1.2){dln(zX(x1),zY(y1)+1,zX(x2),zY(y2)+1,c);dln(zX(x1),zY(y1)-1,zX(x2),zY(y2)-1,c);}}
+function zPot(cx){
+  const x0=zX(cx-12),w=Math.round(25*zSc),y0=zSoilY,hR=Math.max(1,Math.round(2*zSc)),hB=Math.round(11*zSc);
+  fr(x0,y0,w,hR,rgb565(204,131,77));
+  const bw=Math.floor(w*3/5),ins=Math.floor((w-bw)/2);
+  ftri(x0,y0+hR,x0+w,y0+hR,x0+w-ins,y0+hB,rgb565(147,75,45));
+  ftri(x0,y0+hR,x0+w-ins,y0+hB,x0+ins,y0+hB,rgb565(147,75,45));
+  fr(x0+ins,y0+hB-1,bw,1+Math.round(zSc),rgb565(78,43,30));
+  dln(x0+Math.round(6*zSc),y0+hR+Math.round(4*zSc),x0+Math.round(7*zSc),y0+hB-1,rgb565(190,112,66));
+}
+function drawArtPlantT(cx,stage,screenX,soilY,sc,withPot){
+  const rs=vNextObj(variantFor());
+  vNext(rs);vNext(rs);vNext(rs);
+  const lean=Math.floor(vNext(rs)%9)-4, tint=(vNext(rs)>>6)&3,
+        vig=78+Math.floor(vNext(rs)%47), stretch=Math.floor(vNext(rs)%5);
+  zRef=cx;zX0=screenX;zSoilY=soilY;zSc=sc;
+  const stemThin=rgb565(99,116,97),stemA=rgb565(119,131,108),stemB=rgb565(88,132,60);
+  const nominal=[16,28,42,64,86][stage];
+  const topY=129-nominal*vig/100+Math.floor(vNext(rs)%5)-2;
+  const midY=(129+topY)>>1, midX=cx+Math.floor(lean/3);
+  zBranch(cx,129,midX,midY,stemThin);zBranch(midX,midY,cx+lean,topY,stemThin);
+  zBranch(cx+1,129,midX+1,midY,stemA);zBranch(midX+1,midY,cx+1+lean,topY,stemB);
+  if(withPot)zPot(cx+1);
+  const fingers=stage===0?3:stage===1?5:7;
+  const branches=stage===0?0:stage===1?2:stage===2?3+(stretch>=2?1:0):4+(stretch>=2?1:0);
+  for(let i=0;i<branches;++i){
+    const sgn=(i&1)?1:-1, ys=129-(i+1)*(129-topY)/(branches+1);
+    const rise=3+Math.floor(vNext(rs)%5);
+    let len=([0,9,13,15,17][stage])-i*2+Math.floor(vNext(rs)%4)-1;if(len<5)len=5;
+    const tipX=cx+sgn*len+Math.floor(lean/4), tipY=ys-rise;
+    zBranch(cx+Math.floor(lean/3),ys,tipX,tipY,stemA);
+    zBranch(cx+1+Math.floor(lean/3),ys,tipX+1,tipY,stemB);
+    fanLeafTinted(zX(tipX),zY(tipY-1),(stage>=3?.52:.46)*(0.90+vNext(rs)%25/100)*sc,
+                  sgn*(28+Math.floor(vNext(rs)%15)),fingers,tint);
+    if(stage>=3){
+      const bs=(stage===4?1.00:.72)*(0.85+vNext(rs)%30/100);
+      const links=stage===4?3:2;
+      for(let b=0;b<links;++b)
+        artBud(zX(tipX+sgn*b),zY(tipY-2-b*5),bs*(1-b*.22)*sc,stage===4?6:4);
+    }
+  }
+  if(stage===0){fanLeafTinted(zX(cx+lean),zY(topY),.45*sc,Math.floor(vNext(rs)%13)-6,3,tint);}
+  else{
+    fanLeafTinted(zX(cx+lean-5),zY(topY+5),.50*sc,-38+Math.floor(vNext(rs)%9),fingers,tint);
+    fanLeafTinted(zX(cx+lean+5),zY(topY+7),.50*sc,38-Math.floor(vNext(rs)%9),fingers,tint);
+    fanLeafTinted(zX(cx+lean),zY(topY),.58*sc,Math.floor(vNext(rs)%9)-4,fingers,tint);
+  }
+  if(stage>=3){
+    const mj=Math.floor(vNext(rs)%3), links=stage===4?4:3;
+    for(let b=0;b<links;++b){
+      const s=(stage===4?1.30:.95)*(1-b*.16);
+      artBud(zX(cx+lean+((b&1)?1:-1)),zY(topY+8+mj-b*6),s*sc,7-b);}
+  }
+}
+
+// ============================ pages =========================================
+function drawHeader(){
+  fr(0,0,SCREEN_W,HEADER_H,0x0861);fhline(0,HEADER_H-1,SCREEN_W,0x4D89);
+  leafLogo(5,2,WHITE);
+  txt("WIN FLORIDA",31,4,TEXT_MAIN,2);txt("GARDEN SIM",32,18,TEXT_DIM,1);
+  txt("$"+G.credits,258,6,GOLD,2,false,true);
+  const sIdx=Math.min(9,stonedLevel());for(let i=0;i<10;i++)
+    fr(214+i*4,20,3,4,i<sIdx?0xAFE0:0x2444);
+  drr(299,10,14,12,2,PANEL_LIGHT);
+}
+let stones=0;
+function stonedLevel(){return stones;}
+function leafLogo(x,y,color){
+  ctx.fillStyle=C(color);
+  const m=[[0,3],[0,4],[1,2],[1,5],[2,1],[2,6],[3,1],[3,2],[3,3],[3,4],[3,5],[3,6],[4,2],[4,3],[4,4],[5,3],[5,4],[6,2],[6,4],[6,5],[7,1],[7,3],[7,6],[8,2],[8,5],[8,3],[9,2],[9,4],[9,6],[10,3],[10,4],[11,2],[11,5]];
+  m.forEach(p=>ctx.fillRect(x+p[0]*2,y+p[1]*2,2,2));
+}
+function drawGardenBackdrop(){
+  for(let y=HEADER_H;y<HEADER_H+137;++y){const ay=y-HEADER_H;
+    fr(0,y,ART_W,1,rgb565(7+ay*3/136|0,23+ay*14/136|0,25+ay*9/136|0));}
+  [7,43,88,133,170].forEach(x=>fvline(x,23+HEADER_H,114,rgb565(27,50,48)));
+  fhline(0,41+HEADER_H,ART_W,rgb565(27,47,43));
+  [15,38,61,84,107,130,153,175].forEach(x=>fvline(x,41+HEADER_H,96,rgb565(43,66,58)));
+  [52,73,94,115].forEach(y=>fhline(0,y+HEADER_H,ART_W,rgb565(43,66,58)));
+  [66,91,116].forEach(y=>fhline(0,y+HEADER_H,ART_W,rgb565(99,116,97)));
+  fr(0,20+HEADER_H,ART_W,3,rgb565(43,59,53));
+  for(let i=0;i<4;++i){const lx=10+i*44;
+    fr(lx,5+HEADER_H,33,4,rgb565(57,66,60));fr(lx+2,10+HEADER_H,29,3,rgb565(224,220,183));
+    fr(lx+2,13+HEADER_H,29,2,rgb565(170,176,151));}
+  fhline(0,137+HEADER_H,ART_W,rgb565(69,85,60));fr(0,138+HEADER_H,ART_W,6,rgb565(12,25,22));
+  [[20,139],[55,140],[90,139],[130,141],[160,140],[40,142],[110,142]].forEach(p=>dpx(p[0],p[1]+HEADER_H,rgb565(24,39,29)));
+}
+function bar(x,y,label,v,color){
+  txt(label,x,y+3,TEXT_DIM,1);
+  fr(x+44,y,56,9,PANEL_LIGHT);fr(x+45,y+1,Math.round(v*54/100),7,color);
+  txt(v+"%",x+104,y+3,TEXT_MAIN,1);
+}
+function drawGarden(){
+  drawGardenBackdrop();
+  if(G.active)drawArtPlantT(89,stageFor(G.growth),89,129+H,1.0,true);
+  else{fr(178,H,142,144,BG);centre("EMPTY POT",89,120,TEXT_DIM,1);
+    drr(66,166,46,22,4,rgb565(78,43,30));}
+  // stats panel
+  fr(178,H,142,144,BG);
+  fr(178,H,142,20,0x2124);
+  centre(STRAINS[G.strain].toUpperCase().slice(0,18),249,H+6,TEXT_MAIN,1);
+  bar(188,64,"GROWTH",G.growth,G.growth>=100?0x2FED:ACCENT);
+  bar(188,86,"WATER",G.hydration,G.hydration<H2O_NEED[G.strain]?RED:0x2FED);
+  bar(188,108,"VIGOR",G.vigor,G.vigor<20?RED:0x3660);
+  if(G.pest>0){txt("PEST SWARM "+((G.pestSev||5))+"%",188,126,RED,1);
+    txt("USE CARE KIT",188,136,GOLD,1);}
+  else if(G.hydration<H2O_NEED[G.strain]){txt("SOIL IS DRY",188,126,RED,1);}
+  else if(!G.active){txt("PLANT A SEED",188,126,TEXT_DIM,1);}
+  txt("STASH "+G.stash+"u   Q"+G.stashQ+"%",188,150,TEXT_DIM,1);
+  txt("PACKS x"+G.water+"  KITS x"+G.care,188,160,TEXT_DIM,1);
+  // action row
+  fr(0,ACTION_Y,SCREEN_W,NAV_Y-ACTION_Y,BG);
+  if(G.active){
+    const ready=G.growth>=100;
+    const wW=ready?76:103,dX=ready?82:109,tX=ready?161:214;
+    button(3,ACTION_Y+1,wW,26,"WATER",G.water<=0?PANEL_LIGHT:(G.hydration>70?RED:0x2C64),G.water<=0?TEXT_DIM:WHITE);
+    hits.push({x:3,y:ACTION_Y+1,w:wW,h:26,fn:water});
+    button(dX,ACTION_Y+1,ready?76:102,26,"TREAT",G.pest===0||G.care<=0?PANEL_LIGHT:(G.pestSev>60?RED:0x2C64),G.pest===0||G.care<=0?TEXT_DIM:WHITE);
+    hits.push({x:dX,y:ACTION_Y+1,w:ready?76:102,h:26,fn:treat});
+    if(ready){button(tX,ACTION_Y+1,76,26,"HARVEST",0x2FED,WHITE);
+      hits.push({x:tX,y:ACTION_Y+1,w:76,h:26,fn:harvest});}
+    else{button(tX,ACTION_Y+1,103,26,"GROWING",PANEL,TEXT_DIM);}
+  }else{
+    button(3,ACTION_Y+1,103,26,"PLANT SEED",ACCENT_DARK,WHITE);
+    hits.push({x:3,y:ACTION_Y+1,w:103,h:26,fn:()=>{page='MARKET';}});
+  }
+}
+function button(x,y,w,h,label,fill,textc){
+  frr(x,y,w,h,4,fill);centre(label,x+w/2,y+Math.floor((h-9)/2)+1,textc,1);
+}
+function drawMarket(){
+  fr(0,H,SCREEN_W,NAV_Y-H,BG);
+  centre("SEED MARKET",160,H+4,TEXT_MAIN,2);
+  const list=G.unlocked;
+  for(let i=0;i<list;i++){
+    const y=48+i*12;if(y>NAV_Y-16)break;
+    const afford=G.credits>=SEED_PRICE[i];
+    txt(STRAINS[i],8,y,i===G.strain&&!G.active?GOLD:TEXT_MAIN,1);
+    txt("$"+SEED_PRICE[i],200,y,afford?TEXT_MAIN:TEXT_DIM,1);
+    fr(232,y,60,10,i===G.strain&&!G.active?PANEL:ACCENT_DARK);
+    txt(i===G.strain&&!G.active?"GROWING":"PLANT",240,y+1,WHITE,1);
+    hits.push({x:232,y,w:60,h:10,fn:()=>buySeed(i)});
+  }
+  txt("CREDITS $"+G.credits+"   PACKS x"+G.water+"   KITS x"+G.care,8,NAV_Y-12,TEXT_DIM,1);
+}
+function drawStash(){
+  fr(0,H,SCREEN_W,NAV_Y-H,BG);
+  centre("STASH",160,H+4,TEXT_MAIN,2);
+  txt("UNITS: "+G.stash,20,60,TEXT_MAIN,2);
+  txt("QUALITY: "+G.stashQ+"%",20,80,GOLD,1);
+  txt("HARVESTS: "+G.harvests,20,92,TEXT_DIM,1);
+  if(G.stash>0)button(40,120,240,30,"SELL BATCH  ($"+(G.stash*(8+Math.floor(G.stashQ/12)))+")",0x2FED,WHITE),
+    hits.push({x:40,y:120,w:240,h:30,fn:sell});
+  else centre("TRIM AND SELL AFTER A HARVEST",160,130,TEXT_DIM,1);
+}
+function drawSupplies(){
+  fr(0,H,SCREEN_W,NAV_Y-H,BG);
+  centre("SUPPLIES",160,H+4,TEXT_MAIN,2);
+  button(20,50,130,26,"WATER x3  $5",G.credits>=5?0x2C64:PANEL_LIGHT,G.credits>=5?WHITE:TEXT_DIM);
+  hits.push({x:20,y:50,w:130,h:26,fn:buyWater});
+  button(170,50,130,26,"CARE KIT  $7",G.credits>=7?0x2C64:PANEL_LIGHT,G.credits>=7?WHITE:TEXT_DIM);
+  hits.push({x:170,y:50,w:130,h:26,fn:buyCare});
+  txt("GROW SPEED",20,96,TEXT_DIM,1);
+  ["NORMAL","FAST","WOW"].forEach((s,i)=>{
+    button(20+i*96,108,88,24,s+(G.speed===i?" \u2713":""),G.speed===i?ACCENT_DARK:PANEL,WHITE);
+    hits.push({x:20+i*96,y:108,w:88,h:24,fn:()=>{G.speed=i;save();}});});
+  button(20,150,280,26,"SLEEP  (screen off, grow continues)",PANEL,TEXT_DIM);
+  hits.push({x:20,y:150,w:280,h:26,fn:()=>{sleepMode=true;save();}});
+  txt("Ticks: NORMAL 30s / FAST 10s / WOW 4s per growth tick",8,190,TEXT_DIM,1);
+}
+function drawNearby(){
+  fr(0,H,SCREEN_W,NAV_Y-H,BG);
+  centre("NEARBY",160,H+4,TEXT_MAIN,2);
+  centre("NO OTHER GROWERS AROUND",160,110,TEXT_DIM,1);
+  centre("(PHONE EDITION TRADES OVER THE FENCE IRL)",160,128,0x4208,1);
+}
+const NAV=[["GARDEN","GARDEN"],["SUPPLY","SUPPLIES"],["MARKET","MARKET"],["STASH","STASH"],["NEARBY","NEARBY"]];
+function drawNav(){
+  fr(0,NAV_Y,SCREEN_W,NAV_H,0x0861);
+  NAV.forEach((n,i)=>{
+    const x=i*64,fill=page===n[1]?ACCENT_DARK:0x18E3;
+    frr(x+2,NAV_Y+3,60,27,5,fill);
+    centre(n[0],x+32,NAV_Y+12,page===n[1]?WHITE:TEXT_DIM,1);
+    hits.push({x,y:NAV_Y,w:64,h:NAV_H,fn:(p=>()=>{page=p;})(n[1])});
+  });
+}
+function drawLost(){
+  fr(0,H,SCREEN_W,NAV_Y-H,BG);
+  fr(30,80,260,80,10,PANEL);drr(30,80,260,80,10,RED);
+  centre("PLANT LOST",160,90,RED,2);centre(lostReason,160,110,TEXT_MAIN,1);
+  centre("TAP TO PLANT A NEW SEED",160,126,TEXT_DIM,1);
+  hits.push({x:30,y:80,w:260,h:80,fn:()=>{page='MARKET';}});
+}
+
+// ============================ render loop ===================================
+let hits=[];
+function render(){
+  ctx.fillStyle=C(BG);ctx.fillRect(0,0,SCREEN_W,SCREEN_H);
+  if(performance.now()-splashT<1400){drawSplash();return;}
+  if(sleepMode){ctx.fillStyle='#000';ctx.fillRect(0,0,SCREEN_W,SCREEN_H);
+    centre("SLEEPING",160,110,0x2244,2);centre("GROW CONTINUES · TAP TO WAKE",160,130,0x1133,1);
+    hits=[{x:0,y:0,w:SCREEN_W,h:SCREEN_H,fn:()=>{sleepMode=false;}}];return;}
+  hits=[];
+  drawHeader();
+  if(performance.now()-lostT<3500&&lostReason){drawLost();}
+  else if(page==='GARDEN')drawGarden();
+  else if(page==='MARKET')drawMarket();
+  else if(page==='STASH')drawStash();
+  else if(page==='SUPPLIES')drawSupplies();
+  else if(page==='NEARBY')drawNearby();
+  drawNav();
+  if(page==='GARDEN'&&performance.now()-lostT>=3500)lostReason='';
+}
+function drawSplash(){
+  ctx.fillStyle='#000';ctx.fillRect(0,0,SCREEN_W,SCREEN_H);
+  const t=Math.min(1,(performance.now()-splashT)/1400);
+  // leaf logo block, centered, breathing
+  const s=3,x=(320-24*s)/2,y=52;
+  const m=[[0,3],[0,4],[1,2],[1,5],[2,1],[2,6],[3,1],[3,2],[3,3],[3,4],[3,5],[3,6],[4,2],[4,3],[4,4],[5,3],[5,4],[6,2],[6,4],[6,5],[7,1],[7,3],[7,6],[8,2],[8,5],[8,3],[9,2],[9,4],[9,6],[10,3],[10,4],[11,2],[11,5]];
+  const v=Math.floor(140+Math.cos(t*Math.PI*2)*57+57);
+  ctx.fillStyle=`rgb(${v-18},${v},${v-10})`;
+  m.forEach(p=>ctx.fillRect(x+p[0]*s,y+p[1]*s,s,s));
+  centre("WIN FLORIDA",160,150,0x9EFB,2);
+  centre("GARDEN SIM · WEB",160,172,0x630C,1);
+}
+function frame(now){
+  const dt=now-lastFrame;lastFrame=now;
+  if(!sleepMode){
+    const sec=([30,10,4][G.speed]);
+    const nowE=Math.floor(Date.now()/1000);
+    while(G.epoch+sec<=nowE&&nowE-G.epoch<600){G.epoch+=sec;gameTick(false);}
+    catchUpIfNeeded();
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+let lastCatch=0;
+function catchUpIfNeeded(){const n=Date.now();if(n-lastCatch>5000){lastCatch=n;catchUp();}}
+
+// ============================ input =========================================
+function toLogical(ev){
+  const r=cv.getBoundingClientRect();
+  return {x:(ev.clientX-r.left)*SCREEN_W/r.width,y:(ev.clientY-r.top)*SCREEN_H/r.height};
+}
+cv.addEventListener('pointerdown',ev=>{
+  ev.preventDefault();
+  if(performance.now()-splashT<1400){splashT=0;return;}
+  const p=toLogical(ev);
+  for(const h of hits)if(p.x>=h.x&&p.x<=h.x+h.w&&p.y>=h.y&&p.y<=h.y+h.h){h.fn();break;}
+  render();
+},{passive:false});
+
+// ============================ boot ==========================================
+load();catchUp();
+requestAnimationFrame(t=>{lastFrame=t;frame(t);});
+setInterval(()=>{if(!sleepMode){render();}},1000);
+</script>
+</body>
+</html>
