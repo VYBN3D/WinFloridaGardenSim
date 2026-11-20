@@ -2552,13 +2552,15 @@ void drawFullScreenGardenFallback() {
 void restoreFullScreenFallbackRegion() {
   const int left = 178;
   const int right = SCREEN_W;
-  for (int y = 80; y < 210; ++y) {
+  for (int y = 80; y < 224; ++y) {
     float blend = (float)y / SCREEN_H;
     uint8_t r = 5 + (uint8_t)(blend * 10);
     uint8_t g = 19 + (uint8_t)(blend * 30);
     uint8_t b = 21 + (uint8_t)(blend * 20);
     game.drawFastHLine(left, y, right - left, rgb565(r, g, b));
   }
+  game.fillRect(left, 224, right - left, 8, rgb565(32, 49, 39));
+  game.drawFastHLine(left, 224, right - left, rgb565(76, 91, 61));
   game.drawFastVLine(306, 80, 130, rgb565(29, 53, 51));
   game.drawFastHLine(left, 106, right - left, rgb565(23, 44, 42));
   // Trellis wires + posts continue through the restored band so the farmer
@@ -4985,21 +4987,29 @@ void drawFarmerInspector(int pose) {
   uint16_t shirt = rgb565(39, 132, 71);
   uint16_t pants = rgb565(22, 23, 26);
   uint16_t skin = farmerCharacter == 2 ? rgb565(133, 84, 61) : rgb565(230, 184, 143);
-  // Fullscreen: standing on the right. Garden view: standing just left of the
-  // stats panel, as if he walked out from behind it.
+  // Fullscreen: standing on the floor at the right, drawn 1.5x so he reads
+  // at room scale. Garden view: standing just left of the stats panel, as if
+  // he walked out from behind it.
+  const float fs = page == PLANT_VIEW ? 1.5f : 1.0f;
   const int cx = page == PLANT_VIEW ? 274 : 152;
-  const int footY = page == PLANT_VIEW ? 207 : 168;
-  int torsoW = farmerCharacter == 4 ? 34 : 28;
-  int torsoH = farmerCharacter == 4 ? 36 : 41;
-  game.fillRect(cx - 9, footY - 18, 6, 18, pants);
-  game.fillRect(cx + 3, footY - 18, 6, 18, pants);
-  game.fillRoundRect(cx - torsoW / 2, footY - 18 - torsoH, torsoW, torsoH, 6, shirt);
-  game.fillRoundRect(cx - torsoW / 2 - 4, footY - 18 - torsoH + 5, 6, torsoH - 8, 3, shirt);
-  game.fillRoundRect(cx + torsoW / 2 - 2, footY - 18 - torsoH + 5, 6, torsoH - 8, 3, shirt);
-  drawLeafLogo(cx - 12, footY - 18 - torsoH + 3, 1, TFT_WHITE);
-  game.drawLine(cx - torsoW / 2 - 3, footY - 31, cx - torsoW / 2, footY - 24, skin);
-  game.drawLine(cx + torsoW / 2 + 1, footY - 31, cx + torsoW / 2 - 2, footY - 24, skin);
-  drawFarmerHeadLarge(cx, footY - 59, farmerCharacter);
+  const int footY = page == PLANT_VIEW ? 230 : 168;
+  const int legH = (int)(18 * fs);
+  const int legW = (int)(6 * fs);
+  int torsoW = (int)((farmerCharacter == 4 ? 34 : 28) * fs);
+  int torsoH = (int)((farmerCharacter == 4 ? 36 : 41) * fs);
+  game.fillRect(cx - (int)(9 * fs), footY - legH, legW, legH, pants);
+  game.fillRect(cx + (int)(3 * fs), footY - legH, legW, legH, pants);
+  game.fillRoundRect(cx - torsoW / 2, footY - legH - torsoH, torsoW, torsoH, 6, shirt);
+  game.fillRoundRect(cx - torsoW / 2 - (int)(4 * fs), footY - legH - torsoH + (int)(5 * fs),
+                     (int)(6 * fs), torsoH - (int)(8 * fs), 3, shirt);
+  game.fillRoundRect(cx + torsoW / 2 - (int)(2 * fs), footY - legH - torsoH + (int)(5 * fs),
+                     (int)(6 * fs), torsoH - (int)(8 * fs), 3, shirt);
+  drawLeafLogo(cx - (int)(12 * fs), footY - legH - torsoH + (int)(3 * fs), 1, TFT_WHITE);
+  game.drawLine(cx - torsoW / 2 - (int)(3 * fs), footY - (int)(31 * fs),
+                cx - torsoW / 2, footY - (int)(24 * fs), skin);
+  game.drawLine(cx + torsoW / 2 + (int)(1 * fs), footY - (int)(31 * fs),
+                cx + torsoW / 2 - (int)(2 * fs), footY - (int)(24 * fs), skin);
+  drawFarmerHeadScaled(cx, footY - (int)(59 * fs), farmerCharacter, fs);
 }
 
 void drawFarmerSpeechBubble(const FarmerSaying &saying) {
@@ -5130,8 +5140,8 @@ void drawSmokeCutsceneFrame(int frame) {
 
 
 // Scaled copy of drawFarmerHeadLarge for the intro close-up (scale 1 = normal).
-void drawFarmerHeadScaled(int cx, int cy, uint8_t character, int s) {
-#define SP(v) ((v) * (s))
+void drawFarmerHeadScaled(int cx, int cy, uint8_t character, float s) {
+#define SP(v) ((int)((v) * (s)))
   uint16_t hair = character == 3 ? rgb565(210, 176, 104) : rgb565(35, 27, 26);
   uint16_t skin = character == 2 ? rgb565(133, 84, 61)
                 : character == 6 ? rgb565(172, 112, 78)
@@ -5280,8 +5290,8 @@ void drawFarmerHeadScaled(int cx, int cy, uint8_t character, int s) {
     game.drawLine(cx + SP(-8), cy + SP(-4), cx + SP(-5), cy + SP(-2), rgb565(95, 95, 102));
   } else if (character == 4) {
     game.fillRoundRect(cx + SP(-12), cy + SP(-14), SP(24), SP(9), min(SP(6), SP(11)), hair);
-    game.fillRoundRect(cx + SP(-15), cy + SP(-4), SP(5), SP(22), min(SP(3), 2 * s), hair);
-    game.fillRoundRect(cx + SP(10), cy + SP(-4), SP(5), SP(22), min(SP(3), 2 * s), hair);
+    game.fillRoundRect(cx + SP(-15), cy + SP(-4), SP(5), SP(22), min(SP(3), (int)(2 * s)), hair);
+    game.fillRoundRect(cx + SP(10), cy + SP(-4), SP(5), SP(22), min(SP(3), (int)(2 * s)), hair);
     game.fillRoundRect(cx + SP(-10), cy + SP(-5), SP(9), SP(7), min(SP(2), SP(3)), rgb565(10, 13, 16));
     game.fillRoundRect(cx + SP(1), cy + SP(-5), SP(9), SP(7), min(SP(2), SP(3)), rgb565(10, 13, 16));
     game.drawFastHLine(cx + SP(-1), cy + SP(-2), SP(2), rgb565(10, 13, 16));
@@ -5693,53 +5703,75 @@ void drawGrowerWorker(int cx, int footY, int handX, int handY) {
 }
 
 void drawFlowerHarvestFrame(int frame) {
-  game.fillRect(0, HEADER_H, SCREEN_W, NAV_Y - HEADER_H, BG);
-  game.fillRoundRect(13, 38, 294, 158, 10, PANEL);
-  game.drawRoundRect(13, 38, 294, 158, 10, PANEL_LIGHT);
-  game.setTextColor(TEXT_MAIN, PANEL);
-  game.drawCentreString("FLOWER HARVEST", 160, 46, 2);
+  // Full-bleed cinematic harvest in the intro's visual language: gradient
+  // wall, warm hanging lamp, the roommates standing on the floor, and the
+  // grower working down the row with the shears and a gathering basket.
+  for (int y = 0; y < 196; ++y) {
+    float blend = (float)y / 196.0f;
+    uint8_t v = 30 + (uint8_t)(blend * 26);
+    game.drawFastHLine(0, y, SCREEN_W, rgb565(v - 4, v + 8, v + 4));
+  }
+  game.drawFastHLine(0, 196, SCREEN_W, rgb565(76, 91, 61));
+  game.fillRect(0, 197, SCREEN_W, NAV_Y - 197, rgb565(34, 47, 40));
+
+  // Hanging work lamp over the row: cord, shade, warm bulb.
+  game.fillRect(248, 0, 2, 14, rgb565(57, 66, 60));
+  game.fillTriangle(232, 14, 266, 14, 249, 30, rgb565(57, 66, 60));
+  game.drawFastHLine(232, 13, 35, GOLD);
+  game.fillCircle(249, 16, 3, rgb565(224, 220, 183));
 
   static const int plantX[] = {53, 99, 145, 191};
   static const int potCx[] = {24, 68, 112, 156};   // garden pots: same seeds
+
+  // Fresh-cut stumps remain where the shears already passed.
+  for (int i = 0; i < min(frame, 4); ++i) {
+    game.drawFastVLine(plantX[i], 168, 18, rgb565(35, 104, 48));
+    game.drawFastHLine(plantX[i] - 3, 167, 7, rgb565(96, 136, 72));
+  }
+
+  // The remaining roommates, standing in their pots on the floor.
   for (int i = frame; i < 4; ++i) {
     int x = plantX[i];
-    // Exactly the roommate from the small garden (same seed), sized to fit.
-    drawArtPlantT(potCx[i], stageForGrowth(), x, 129 + HEADER_H, 0.75f, false);
-    game.fillRoundRect(x - 12, 158, 24, 9, 3, rgb565(91, 49, 33));
-  }
-  for (int i = 0; i < min(frame, 4); ++i) {   // fresh-cut stumps remain
-    game.drawFastVLine(plantX[i], 138, 20, rgb565(35, 104, 48));
-    game.drawFastHLine(plantX[i] - 3, 137, 7, rgb565(96, 136, 72));
+    drawArtPlantT(potCx[i], stageForGrowth(), x, 185, 0.75f, true);
   }
 
-  // The grower works his way down the row, shears in hand.
-  int cutX = plantX[min(frame, 3)];
-  game.drawCircle(cutX - 5, 145, 5, rgb565(185, 195, 196));
-  game.drawCircle(cutX + 5, 145, 5, rgb565(185, 195, 196));
-  game.drawLine(cutX - 2, 142, cutX + 14, 132, rgb565(208, 218, 218));
-  game.drawLine(cutX + 2, 142, cutX - 13, 132, rgb565(208, 218, 218));
-  drawGrowerWorker(max(44, cutX - 30), 178, cutX + 5, 144);
+  // The grower works his way down the row, shears in a bent arm.
+  const int cutX = plantX[min(frame, 3)];
+  game.drawCircle(cutX - 4, 162, 4, rgb565(185, 195, 196));
+  game.drawCircle(cutX + 4, 162, 4, rgb565(185, 195, 196));
+  game.drawLine(cutX - 4, 159, cutX - 13, 148, rgb565(208, 218, 218));
+  game.drawLine(cutX + 4, 159, cutX + 14, 151, rgb565(208, 218, 218));
+  drawGrowerWorker(min(286, cutX + 26), 196, cutX + 4, 160);
 
-  game.fillRoundRect(232, 130, 47, 39, 6, rgb565(117, 70, 43));
-  game.drawRoundRect(232, 130, 47, 39, 6, rgb565(193, 139, 83));
-  game.drawFastHLine(238, 137, 35, rgb565(219, 164, 103));
+  // Buds pile into the gathering basket on the floor.
+  game.fillRoundRect(250, 168, 50, 24, 4, rgb565(117, 70, 43));
+  game.drawRoundRect(250, 168, 50, 24, 4, rgb565(193, 139, 83));
+  game.fillRoundRect(248, 164, 54, 6, 2, rgb565(143, 83, 49));
   for (int i = 0; i < min(frame, 6); ++i) {
-    int bx = 243 + (i % 3) * 12;
-    int by = 150 + (i / 3) * 11;
-    drawBud(bx, by, 0.9f);   // real buds piling into the basket
+    int bx = 258 + (i % 3) * 12;
+    int by = 158 - (i / 3) * 9;
+    drawBud(bx, by, 0.85f);   // real buds piling into the basket
   }
-  game.setTextColor(GOLD, PANEL);
+
+  // Trimmed leaves drift as the shears move down the row.
+  for (int i = 0; i < frame; ++i) {
+    int leafX = 40 + ((i * 47 + frame * 13) % 240);
+    int leafY = 96 + (i % 4) * 9;
+    drawFanLeaf(leafX, leafY, 0.10f, i * 14);
+  }
+
+  game.fillRect(0, NAV_Y, SCREEN_W, SCREEN_H - NAV_Y, BG);
+  game.setTextColor(GOLD, BG);
   if (frame >= 5) {
     char batchLabel[32];
     snprintf(batchLabel, sizeof(batchLabel), "%u FLOWER UNITS GATHERED", lastHarvestUnits);
-    game.drawCentreString(batchLabel, 160, 180, 1);
+    game.drawCentreString(batchLabel, 160, 212, 1);
   } else {
-    game.drawCentreString("GATHERING THE ROOM", 160, 180, 1);
+    game.drawCentreString("GATHERING THE ROOM", 160, 212, 1);
   }
 }
-
 void animateFlowerHarvest() {
-  beginCutsceneScene();
+  beginBareHeaderScene();   // full-bleed: the scene owns the whole display
   for (int frame = 0; frame < 6; ++frame) {
     drawFlowerHarvestFrame(frame);
     presentFrame();
