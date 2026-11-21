@@ -409,8 +409,8 @@ void waitForCutsceneContinue();
 // speaker amp (GPIO1, LOW = enabled) driving the 2P speaker connector.
 // There is no GPIO to tone() — the voices are synthesized as 16-bit PCM in
 // audioPump() below, so the lead and the drums both play through the speaker.
-uint8_t musicVolume = 40;  // 0..100% of max loudness; 0 = music off
-uint8_t musicVolumeBeforeMute = 40;  // volume restored when the mute toggle is tapped
+uint8_t musicVolume = 100;  // 0..100% of max loudness; 0 = music off (default: full volume)
+uint8_t musicVolumeBeforeMute = 100;  // volume restored when the mute toggle is tapped
 bool deathWarnModal = false;            // centered dying-plant popup, any page
 bool deathWarnStamped = false;          // modal pixels currently in the buffer
 unsigned long deathWarnNextAllowed = 0; // re-popup cooldown after dismissal
@@ -1323,7 +1323,7 @@ void newGame() {
   page = CHARACTER_SELECT;
   gameSpeed = 0;
   displayInverted = false;
-  musicVolume = 40;
+  musicVolume = 100;  // default to full volume (user request)
   hashRoomUnlocked = false;
   saveGame();
 }
@@ -1422,8 +1422,8 @@ void loadGame() {
   gameSpeed = preferences.getUChar("gspeed", 0);
   if (gameSpeed > 2) gameSpeed = 0;
   displayInverted = preferences.getBool("invert", false);
-  musicVolume = preferences.getUChar("mvol", 40);
-  if (musicVolume > 100) musicVolume = 40;
+  musicVolume = preferences.getUChar("mvol", 100);
+  if (musicVolume > 100) musicVolume = 100;
   hashRoomUnlocked = preferences.getBool("hashRoom", false);
   pestType = preferences.getUChar("pest", 0);
   pestSeverity = preferences.getUChar("pestLevel", 0);
