@@ -5529,6 +5529,10 @@ void beginBareHeaderScene() {
 }
 
 void animateGownUpCutscene() {
+  // Theme drops in with the intro scene: if the boot groove is already
+  // looping it keeps playing, but if the stream went silent the first-time
+  // grower still gets the theme riding along with the cutscene.
+  if (audioTx && musicVolume && !pcmStream) pcmStart(PCM_THEME);
   beginBareHeaderScene();
   for (int frame = 0; frame < 8; ++frame) {
     drawGownUpCutsceneFrame(frame);
