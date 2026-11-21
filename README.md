@@ -14,6 +14,7 @@ Three boards. One firmware family. Everything below is live in the latest
 ## 📑 Contents
 
 - [About the game](#about-the-game)
+- [Play it in your browser (web emulator)](#play-it-in-your-browser-web-emulator)
 - [Supported boards](#supported-boards)
 - [Installing / updating](#installing--updating)
   - [Over the air (OTA)](#over-the-air-ota)
@@ -61,6 +62,35 @@ Every choice matters:
 
 The game keeps growing on **wall-clock time** — water before bed, wake up to a
 mature room. Deep sleep between sessions costs almost nothing.
+
+
+## Play it in your browser (web emulator)
+
+No board? No problem. The firmware's grow-room core runs as a **web emulator**:
+
+**→ [vybn3d.github.io/WinFloridaGardenSim](https://vybn3d.github.io/WinFloridaGardenSim/)**
+
+- The page is a full landing page + manual wrapped around the emulator, which
+  renders inside an ESP32 case frame — tap the panel like the touchscreen and
+  press the on-case **BOOT** button like the board.
+- **Pixel-faithful to the S3 build**: 480×320 panel, the same wrapper geometry
+  (×1.5 / ×1.33 scaling), the exact TFT_eSPI bitmap fonts (5×7 GLCD, 16px,
+  26px RLE), the leaf logo mask, the vector plant art pipeline with spear
+  colas, and the IMA-ADPCM boot chant → bong → theme loop decoded live to
+  WebAudio.
+- **Same game rules**: real-time grow clock (30 s ticks), hydration drain +
+  wilt-timer death, pests and care kits, harvest grading, 16-strain market,
+  NORMAL/FAST/WOW speeds, sleep and deep-sleep via BOOT.
+- **Fullscreen mode** for phones — the emulator fills the screen and locks
+  landscape where the browser allows it.
+- **Saves in the browser** and keeps growing on wall-clock time while you're
+  away, just like the board does through sleep.
+- **Tracks the firmware releases**: the OPTIONS → build tag is checked against
+  the latest `version.txt` from this repo's releases.
+
+The emulator ships from the `gh-pages` branch of this repo; pushing an updated
+build there updates the page. A plain-text link manifest is kept up to date
+alongside it.
 
 ## Supported boards
 
