@@ -1458,6 +1458,12 @@ function nvsFlush(immediate) {
   const write = () => { try { localStorage.setItem(NVS_KEY, JSON.stringify(nvs)); } catch (e) {} };
   if (immediate) write(); else nvsTimer = setTimeout(write, 250);
 }
+// Debug/testing affordance: seed NVS from the URL (?nvs={...json...}) before boot.
+try {
+  const qNvs = new URLSearchParams(location.search).get('nvs');
+  window.__qNvsDebug = qNvs ? ('len=' + qNvs.length) : 'none';
+  if (qNvs) { Object.assign(nvs, JSON.parse(qNvs)); window.__qNvsDebug += ' merged started=' + nvs.started; nvsFlush(true); }
+} catch (e) { window.__qNvsDebug = 'ERR ' + e.message; }
 document.addEventListener('visibilitychange', () => { if (document.hidden) nvsFlush(true); });
 window.addEventListener('pagehide', () => nvsFlush(true));
 
@@ -1604,6 +1610,7 @@ document.addEventListener('fullscreenchange', () => {
 
 // ---- boot the firmware ----
 createGardenSim({
+  locateFile: f => f + '?b=' + Date.now(),   // never serve a stale wasm from cache
   gardenDirty: true,
   t0: Date.now(),   // millis() = Date.now() - t0 must fit in uint32 — never performance.now()
   audioPush,
