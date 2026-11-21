@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="pragma" content="no-cache">
+<meta http-equiv="expires" content="0">
+<title>WinFlorida Garden Sim — ESP32-S3 Web Emulator</title>
+<style>
+:root{--bg:#07110c;--panel:#0d1a12;--card:#12201680;--line:#1e3527;--txt:#cfe6d4;--dim:#6f9480;--acc:#46d47e;--gold:#f3c53d;--red:#e05555}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+body{overflow-x:hidden}
+a{color:var(--acc)}
+/* ---------- top bar ---------- */
+.top{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:#07110cf2;backdrop-filter:blur(8px);z-index:5}
+.top .leaf{width:26px;height:26px;image-rendering:pixelated}
+.top h1{font-size:15px;margin:0;letter-spacing:2px;color:#eafff0}
+.top .ver{margin-left:auto;font-size:11px;color:var(--dim);border:1px solid var(--line);padding:4px 10px;border-radius:20px}
+.top .ver b{color:var(--acc)}
+/* ---------- hero ---------- */
+.hero{max-width:1060px;margin:0 auto;padding:34px 18px 10px;text-align:center}
+.hero h2{font-size:clamp(22px,5vw,40px);margin:0 0 8px;letter-spacing:3px;color:#eafff0}
+.hero p{color:var(--dim);font-size:13px;line-height:1.7;margin:0 auto 24px;max-width:640px}
+/* ---------- device ---------- */
+.deviceWrap{display:flex;justify-content:center;padding:10px 0 30px}
+.device{position:relative;width:min(96vw,540px);border-radius:30px;padding:16px 16px 12px;
+  background:linear-gradient(170deg,#20262b,#12171b 55%,#181d22);
+  border:1px solid #32393f;
+  box-shadow:0 40px 80px -24px #000, inset 0 1px 0 #ffffff18, inset 0 -3px 8px #0009, inset 0 3px 8px #00000055}
+.screenFrame{position:relative;background:#000;border-radius:14px;padding:0;overflow:hidden;
+  border:10px solid #0a0d0f;
+  box-shadow:inset 0 0 0 1px #ffffff10, 0 0 30px #46d47e12, inset 0 2px 10px #000}
+canvas#screen{display:block;width:100%;height:auto;image-rendering:pixelated;background:#000}
+.caseRow{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding:0 6px}
+.caseBrand{font-size:9px;letter-spacing:2px;color:#5d6a72;user-select:none}
+.bootBtn{border:1px solid #454d54;background:radial-gradient(circle at 35% 25%,#2c333a,#171c20);
+  color:#aeb8bf;font-family:inherit;font-size:10px;letter-spacing:1.5px;padding:9px 20px;border-radius:18px;
+  cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;
+  box-shadow:0 2px 6px #0009, inset 0 1px 0 #ffffff14}
+.bootBtn:active{background:#2c333a;color:#fff;transform:translateY(1px)}
+
+/* ---------- controls hint ---------- */
+.keyRow{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:4px 0 26px}
+.keyRow .k{font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:5px 10px}
+.keyRow .k b{color:var(--txt);font-weight:normal}
+/* ---------- manual ---------- */
+.manual{max-width:1060px;margin:0 auto;padding:0 18px 60px}
+.manual h3{font-size:13px;letter-spacing:3px;color:var(--acc);border-bottom:1px solid var(--line);padding-bottom:8px;margin:34px 0 16px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.card h4{margin:0 0 8px;font-size:12px;color:#eafff0;letter-spacing:1px}
+.card p{margin:0;font-size:11.5px;line-height:1.75;color:var(--dim)}
+.card p b{color:var(--txt);font-weight:normal}
+.card .pill{display:inline-block;font-size:9px;border:1px solid var(--line);border-radius:10px;padding:1px 8px;margin:6px 6px 0 0;color:var(--acc)}
+table.strains{width:100%;border-collapse:collapse;font-size:11px}
+table.strains th{color:var(--dim);text-align:left;font-weight:normal;border-bottom:1px solid var(--line);padding:6px 8px;letter-spacing:1px}
+table.strains td{padding:6px 8px;border-bottom:1px solid #16281c;color:var(--dim)}
+table.strains td:first-child{color:var(--txt)}
+table.strains td .d{font-size:9px;border-radius:8px;padding:1px 7px;border:1px solid var(--line)}
+.d.E{color:#7fdc9c}.d.M{color:var(--gold)}.d.H{color:#e8a355}.d.X{color:var(--red)}
+/* ---------- fullscreen mode ---------- */
+.device.fs{position:fixed;inset:0;width:100vw;height:100vh;z-index:99;border-radius:0;border:none;
+  padding:0;background:#000;max-width:none;display:flex;align-items:center;justify-content:center}
+.device.fs .screenFrame{border:none;border-radius:0;height:100%;width:100%;display:flex;align-items:center;justify-content:center}
+.device.fs #screen{width:auto;height:100%;max-width:100vw;max-height:100vh;object-fit:contain}
+.device.fs .caseRow,.device.fs .silk{display:none}
+.device:fullscreen{position:fixed;inset:0;width:100vw;height:100vh;border-radius:0;border:none;padding:0;
+  background:#000;display:flex;align-items:center;justify-content:center}
+.device:fullscreen .screenFrame{border:none;border-radius:0;height:100%;width:100%;display:flex;align-items:center;justify-content:center}
+.device:fullscreen #screen{width:auto;height:100%;max-width:100vw;max-height:100vh}
+.device:fullscreen .caseRow{display:none}
+.fsBtn{border:1px solid #454d54;background:radial-gradient(circle at 35% 25%,#2c333a,#171c20);
+  color:#aeb8bf;font-family:inherit;font-size:10px;letter-spacing:1.5px;padding:9px 16px;border-radius:18px;
+  cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;
+  box-shadow:0 2px 6px #0009, inset 0 1px 0 #ffffff14}
+.fsBtn:active{transform:translateY(1px);color:#fff}
+/* floating exit pill — the only way out of fullscreen on phones, where the
+   caseRow (with the fullscreen button) is hidden */
+.fsExit{display:none;position:absolute;top:14px;right:14px;z-index:120;
+  border:1px solid #ffffff33;background:#000000b8;color:#dfe7ec;font-family:inherit;font-size:10px;
+  letter-spacing:1.5px;padding:10px 16px;border-radius:18px;cursor:pointer;
+  user-select:none;-webkit-user-select:none;touch-action:manipulation;backdrop-filter:blur(4px);
+  box-shadow:0 2px 8px #000a}
+.fsExit:active{color:#fff}
+.device.fs .fsExit,.device:fullscreen .fsExit{display:block}
+/* first-tap sound hint: browsers block all audio until the user interacts */
+.sndHint{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;z-index:110;
+  background:#000000c9;color:#ffd76a;border:1px solid #ffd76a55;font-family:inherit;font-size:10px;
+  letter-spacing:1.5px;padding:9px 14px;border-radius:16px;pointer-events:none;
+  animation:sndPulse 1.8s ease-in-out infinite}
+@keyframes sndPulse{0%,100%{opacity:.85}50%{opacity:.45}}
+.sndHint.gone{display:none}
+
+footer{border-top:1px solid var(--line);padding:18px;text-align:center;color:var(--dim);font-size:10.5px;line-height:1.8}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <canvas class="leaf" id="leafCv" width="24" height="24"></canvas>
+  <h1>WIN FLORIDA&nbsp;GARDEN&nbsp;SIM</h1>
+  <div class="ver" id="verBadge">WEB BUILD <b id="verNum">v42-S3</b></div>
+</div>
+
+<div class="hero">
+  <h2>THE GROW ROOM,<br>IN YOUR BROWSER</h2>
+  <p>A full emulator of the WinFlorida ESP32-S3 grow board. The screen below runs the same
+  vector art, the same bitmap fonts and the same real-time grow clock as the firmware —
+  touch it like the panel, press <b style="color:#9fd4b4">BOOT</b> like the board. Your crop
+  grows in real time and keeps growing after you close the tab.</p>
+
+  <div class="deviceWrap">
+    <div class="device" id="device">
+      <div class="screenFrame"><canvas id="screen" width="480" height="320"></canvas></div>
+      <button class="fsExit" id="fsExit" aria-label="Exit fullscreen">✕&nbsp;EXIT</button>
+      <div class="sndHint" id="sndHint">♪ TAP ANYWHERE FOR SOUND</div>
+      <div class="caseRow">
+        <button class="fsBtn" id="fsBtn">⛶ FULLSCREEN</button>
+        <div class="caseBrand">WINFLORIDA GARDEN SIM</div>
+        <button class="bootBtn" id="bootBtn">BOOT</button>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div class="keyRow">
+    <div class="k"><b>TOUCH</b> the screen like the panel</div>
+    <div class="k"><b>BOOT</b> opens POWER — quick press sleeps, hold 1.5s deep-sleeps</div>
+    <div class="k"><b>AUDIO</b> starts on first tap · <b>⛶</b> fills the screen (landscape where the browser allows)</div>
+  </div>
+</div>
+
+<div class="manual">
+  <h3>HOW TO PLAY</h3>
+  <div class="cards">
+    <div class="card"><h4>1 · PLANT</h4><p>Open <b>MARKET</b>, buy a seed (starting cash $20) and hit
+    <b>PLANT</b>. Four pots per room — the board rotates you through one plant at a time, web edition
+    included. New strains unlock after every harvest.</p></div>
+    <div class="card"><h4>2 · WATER</h4><p>Hydration drains every growth tick (<b>3%</b> — thirstier
+    strains drain <b>+2</b>). Water packs add <b>+32%</b>. Below <b>20%</b> the wilt timer starts;
+    20 dry ticks with no water and the plant dies. Bone-dry soil burns vigor fast.</p>
+    <span class="pill">$5 = 3 PACKS</span></div>
+    <div class="card"><h4>3 · GROW</h4><p>Plants grow only when hydration meets the strain's need and
+    vigor is above <b>18</b>. Normal speed lands a grow in about <b>25 real minutes</b>; SUPPLY has
+    FAST and WOW speeds. Stages: sprout → veg → pre-flower → flower → ripe.</p>
+    <span class="pill">NORMAL 30s</span><span class="pill">FAST 10s</span><span class="pill">WOW 4s</span></div>
+    <div class="card"><h4>4 · PESTS</h4><p>From 12% growth there's a small chance per tick of a pest
+    swarm (gnats, mites, aphids). Severity climbs <b>+7/tick</b>, stressing vigor and thirst until you
+    use a <b>CARE KIT</b>. Bad infestations warn you on any page.</p>
+    <span class="pill">$7 = KIT</span></div>
+    <div class="card"><h4>5 · HARVEST</h4><p>At <b>100%</b> the HARVEST button lights up. A room yields
+    <b>4 flower units</b> graded by vigor into your stash, and unlocks the next strain in the
+    catalog. Occasional mold events cost a unit — remediation kits buy them back.</p></div>
+    <div class="card"><h4>6 · SELL &amp; REPEAT</h4><p><b>STASH</b> shows untrimmed units and quality;
+    selling pays <b>units × (8 + quality/12)</b>. Roll credits into packs, kits and harder strains.
+    16 strains from Northern Lights to Foreign Kushmints.</p></div>
+    <div class="card"><h4>7 · POWER</h4><p><b>BOOT</b> quick press opens POWER → quick press sleeps
+    (screen off, grow continues), holding <b>1.5s</b> deep-sleeps — a full reboot, exactly like the
+    board. Tap the screen to cancel the popup.</p></div>
+    <div class="card"><h4>8 · SAVES &amp; UPDATES</h4><p>Progress lives in this browser (localStorage)
+    and the wall clock keeps growing while you're away. The web build tracks the firmware releases —
+    OPTIONS → CHECK UPDATES compares your build tag against the latest GitHub release.</p></div>
+  </div>
+
+  <h3>THE STRAIN CATALOG</h3>
+  <div class="card" style="overflow-x:auto">
+    <table class="strains" id="strainTable">
+      <tr><th>STRAIN</th><th>TYPE</th><th>SEED</th><th>FLOWER</th><th>HASH</th><th>PACE</th><th>DIFFICULTY</th></tr>
+    </table>
+  </div>
+
+  <h3>CHEAT CODES</h3>
+  <div class="card">
+    <h4>OPTIONS → CHEATS</h4>
+    <p>Type a code on the on-screen keyboard, then tap <b>ACTIVATE</b>. Same ten codes as the
+    board — nothing added, nothing removed.</p>
+    <table class="strains">
+      <tr><th>CODE</th><th>WHAT IT DOES</th></tr>
+      <tr><td><b>CASH</b> / <b>MONEY</b></td><td>+$500 added</td></tr>
+      <tr><td><b>SEEDS</b></td><td>+8 seeds of the strain you have selected</td></tr>
+      <tr><td><b>STASH</b></td><td>+10 flower jars (A grade)</td></tr>
+      <tr><td><b>UNLOCK</b></td><td>all strains unlocked</td></tr>
+      <tr><td><b>HARVEST</b></td><td>plant ready to harvest (needs a plant)</td></tr>
+      <tr><td><b>TURBO</b></td><td>extreme speed + glow</td></tr>
+      <tr><td><b>HYDRO</b></td><td>soil soaked to 100%</td></tr>
+      <tr><td><b>PEST</b></td><td>garden pest-free</td></tr>
+      <tr><td><b>CARE</b></td><td>supplies restocked (5 packs / 5 kits / 5 defense)</td></tr>
+      <tr><td><b>SKIP</b></td><td>skip an open defoliation window</td></tr>
+    </table>
+  </div>
+
+  <h3>ABOUT THIS BUILD</h3>
+  <div class="cards">
+    <div class="card"><h4>WHAT IT IS</h4><p>A browser port of the WinFlorida ESP32-S3 firmware
+    (<b id="aboutVer">v42-S3</b>): 480×320 panel, S3 wrapper geometry (×1.5 / ×1.33), the exact
+    TFT_eSPI bitmap fonts (5×7 GLCD, 16px, 26px RLE), the leaf logo mask, the plant art pipeline and
+    the IMA-ADPCM soundtrack decoded live to WebAudio.</p></div>
+    <div class="card"><h4>HARDWARE ↔ WEB</h4><p>ILI9488 panel → canvas · FT6206 touch → touch events ·
+    ES8311/FM8002E → WebAudio · BOOT → on-board button · light/deep sleep → suspend/reload ·
+    battery/charging → simulated · ESP-NOW Nearby → coming online. OTA → version.txt check.</p></div>
+  </div>
+</div>
+
+<footer>
+  WIN FLORIDA GARDEN SIM · WEB EDITION · built from the
+  <a href="https://github.com/VYBN3D/WinFloridaGardenSim">WinFloridaGardenSim</a> firmware<br>
+  boards OTA-update over the air; this page updates by reloading after a release.
+</footer>
+
+<script src="garden.js"></script>
+<script src="garden-loader.js"></script>
+</body>
+</html>

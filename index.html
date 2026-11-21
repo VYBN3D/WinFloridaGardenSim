@@ -85,6 +85,13 @@ table.strains td .d{font-size:9px;border-radius:8px;padding:1px 7px;border:1px s
   box-shadow:0 2px 8px #000a}
 .fsExit:active{color:#fff}
 .device.fs .fsExit,.device:fullscreen .fsExit{display:block}
+/* first-tap sound hint: browsers block all audio until the user interacts */
+.sndHint{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;z-index:110;
+  background:#000000c9;color:#ffd76a;border:1px solid #ffd76a55;font-family:inherit;font-size:10px;
+  letter-spacing:1.5px;padding:9px 14px;border-radius:16px;pointer-events:none;
+  animation:sndPulse 1.8s ease-in-out infinite}
+@keyframes sndPulse{0%,100%{opacity:.85}50%{opacity:.45}}
+.sndHint.gone{display:none}
 
 footer{border-top:1px solid var(--line);padding:18px;text-align:center;color:var(--dim);font-size:10.5px;line-height:1.8}
 </style>
@@ -108,6 +115,7 @@ footer{border-top:1px solid var(--line);padding:18px;text-align:center;color:var
     <div class="device" id="device">
       <div class="screenFrame"><canvas id="screen" width="480" height="320"></canvas></div>
       <button class="fsExit" id="fsExit" aria-label="Exit fullscreen">✕&nbsp;EXIT</button>
+      <div class="sndHint" id="sndHint">♪ TAP ANYWHERE FOR SOUND</div>
       <div class="caseRow">
         <button class="fsBtn" id="fsBtn">⛶ FULLSCREEN</button>
         <div class="caseBrand">WINFLORIDA GARDEN SIM</div>
@@ -1457,6 +1465,11 @@ let nvs = {};
 try { nvs = JSON.parse(localStorage.getItem(NVS_KEY) || '{}'); } catch (e) { nvs = {}; }
 // One-time: raise stored music volume to the new 100% default (old builds shipped 40).
 try {
+  if (!localStorage.getItem('wfg-mvol-100-v2')) {
+    // second pass: saves made before the volume change keep mvol 40 — raise them
+    if (typeof nvs.mvol === 'number' && nvs.mvol < 100) nvs.mvol = 100;
+    localStorage.setItem('wfg-mvol-100-v2', '1');
+  }
   if (!localStorage.getItem('wfg-mvol-migrated')) {
     if (typeof nvs.mvol === 'number' && nvs.mvol < 100) nvs.mvol = 100;
     localStorage.setItem('wfg-mvol-migrated', '1');
@@ -1646,6 +1659,14 @@ document.addEventListener('fullscreenchange', () => {
 });
 
 // ---- boot the firmware ----
+// Sound hint: browsers can't start audio before the first user gesture; hide
+// the pill the moment audio actually starts.
+const sndHint = document.getElementById('sndHint');
+if (sndHint) {
+  const hideHint = () => { sndHint.classList.add('gone'); window.removeEventListener('pointerdown', hideHint, true); };
+  window.addEventListener('pointerdown', hideHint, true);
+}
+
 createGardenSim({
   locateFile: f => f + '?b=' + Date.now(),   // never serve a stale wasm from cache
   gardenDirty: true,

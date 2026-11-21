@@ -73,6 +73,11 @@ let nvs = {};
 try { nvs = JSON.parse(localStorage.getItem(NVS_KEY) || '{}'); } catch (e) { nvs = {}; }
 // One-time: raise stored music volume to the new 100% default (old builds shipped 40).
 try {
+  if (!localStorage.getItem('wfg-mvol-100-v2')) {
+    // second pass: saves made before the volume change keep mvol 40 — raise them
+    if (typeof nvs.mvol === 'number' && nvs.mvol < 100) nvs.mvol = 100;
+    localStorage.setItem('wfg-mvol-100-v2', '1');
+  }
   if (!localStorage.getItem('wfg-mvol-migrated')) {
     if (typeof nvs.mvol === 'number' && nvs.mvol < 100) nvs.mvol = 100;
     localStorage.setItem('wfg-mvol-migrated', '1');
@@ -262,6 +267,14 @@ document.addEventListener('fullscreenchange', () => {
 });
 
 // ---- boot the firmware ----
+// Sound hint: browsers can't start audio before the first user gesture; hide
+// the pill the moment audio actually starts.
+const sndHint = document.getElementById('sndHint');
+if (sndHint) {
+  const hideHint = () => { sndHint.classList.add('gone'); window.removeEventListener('pointerdown', hideHint, true); };
+  window.addEventListener('pointerdown', hideHint, true);
+}
+
 createGardenSim({
   locateFile: f => f + '?b=' + Date.now(),   // never serve a stale wasm from cache
   gardenDirty: true,
