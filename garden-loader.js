@@ -17,19 +17,26 @@ let ringW = 0, ringRd = 0, AC = null, ampOn = false, spn = null;
 
 function audioPush(ptr, frames) {
   if (!sim) return;
-  const heap = sim.HEAP16;
-  for (let i = 0; i < frames; i++) {
-    const L = heap[(ptr >> 1) + i * 2] / 32768;
-    const R = heap[(ptr >> 1) + i * 2 + 1] / 32768;
-    ringL[ringW % RING_N] = L;
-    ringR[ringW % RING_N] = R;
-    ringW++;
-  }
+  try {
+    const heap = sim.HEAP16;
+    for (let i = 0; i < frames; i++) {
+      const L = heap[(ptr >> 1) + i * 2] / 32768;
+      const R = heap[(ptr >> 1) + i * 2 + 1] / 32768;
+      ringL[ringW % RING_N] = L;
+      ringR[ringW % RING_N] = R;
+      ringW++;
+    }
+  } catch (e) { logErr('audio', e); }
+}
+function logErr(where, e) {
+  try { window.__simLog.push(where + ': ' + (e && (e.message || e))); } catch (x) {}
 }
 function startAudio() {
   if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
   try {
     AC = new (window.AudioContext || window.webkitAudioContext)();
+    // Start at the freshest audio — anything already queued is stale.
+    ringRd = Math.max(0, ringW - 1024);
     spn = AC.createScriptProcessor(2048, 0, 2);
     // The firmware streams 16 kHz stereo; the context runs at ~44.1/48 kHz.
     // Walk the ring with a fractional cursor so pitch stays exact.
@@ -38,6 +45,8 @@ function startAudio() {
       const oL = e.outputBuffer.getChannelData(0);
       const oR = e.outputBuffer.getChannelData(1);
       const step = AUD_RATE / AC.sampleRate;
+      // If the sim has fallen behind, skip the backlog so audio stays in sync.
+      if (ringW - ringRd > AUD_RATE) ringRd = ringW - AUD_RATE;
       let n = 0;
       for (let i = 0; i < oL.length; i++) {
         rpos += step;
@@ -62,6 +71,13 @@ window.addEventListener('pointerdown', startAudio, { once: false });
 const NVS_KEY = 'wfg-nvs-v42-S3';
 let nvs = {};
 try { nvs = JSON.parse(localStorage.getItem(NVS_KEY) || '{}'); } catch (e) { nvs = {}; }
+// One-time: raise stored music volume to the new 100% default (old builds shipped 40).
+try {
+  if (!localStorage.getItem('wfg-mvol-migrated')) {
+    if (typeof nvs.mvol === 'number' && nvs.mvol < 100) nvs.mvol = 100;
+    localStorage.setItem('wfg-mvol-migrated', '1');
+  }
+} catch (e) {}
 let nvsTimer = null;
 function nvsFlush(immediate) {
   clearTimeout(nvsTimer);
@@ -99,11 +115,11 @@ const bootBtn = document.getElementById('bootBtn');
 function bootPress(ev) {
   if (ev) ev.preventDefault();
   startAudio();
-  if (!bootDown) { bootDown = true; if (sim) sim._touchBoot(1); }
+  if (!bootDown) bootDown = true;
 }
 function bootRelease(ev) {
   if (ev) ev.preventDefault();
-  if (bootDown) { bootDown = false; if (sim) sim._touchBoot(0); }
+  if (bootDown) bootDown = false;
 }
 if (bootBtn) {
   bootBtn.addEventListener('pointerdown', bootPress, { passive: false });
@@ -132,13 +148,15 @@ const INV_LUT = new Uint32Array(65536);
 for (let c = 0; c < 65536; c++) INV_LUT[c] = LUT[c ^ 0xFFFF];
 function blit() {
   if (!sim) return;
-  // The framebuffer is a static array inside the wasm module — read it at the
-  // address the shim exported, never at offset 0.
-  const fbBase = sim._garden_fb_ptr() >> 1;
-  const fb = sim.HEAPU16, N = PANEL_W * PANEL_H;
-  const lut = invert ? INV_LUT : LUT;
-  for (let i = 0; i < N; i++) pix32[i] = lut[fb[fbBase + i]];
-  sctx.putImageData(img, 0, 0);
+  try {
+    // The framebuffer is a static array inside the wasm module — read it at the
+    // address the shim exported, never at offset 0.
+    const fbBase = sim._garden_fb_ptr() >> 1;
+    const fb = sim.HEAPU16, N = PANEL_W * PANEL_H;
+    const lut = invert ? INV_LUT : LUT;
+    for (let i = 0; i < N; i++) pix32[i] = lut[fb[fbBase + i]];
+    sctx.putImageData(img, 0, 0);
+  } catch (e) { logErr('blit', e); }
 }
 
 function rafLoop() {
@@ -213,7 +231,7 @@ document.addEventListener('fullscreenchange', () => {
 // ---- boot the firmware ----
 createGardenSim({
   gardenDirty: true,
-  t0: performance.now(),
+  t0: Date.now(),   // millis() = Date.now() - t0 must fit in uint32 — never performance.now()
   audioPush,
   audioLevel: () => (ampOn ? 1 : 0),
   touchCount: () => (touchDown ? 1 : 0),
@@ -241,9 +259,11 @@ createGardenSim({
 }).then(M => {
   sim = M;
   window.__sim = M; window.__simLog = [];
+  window.addEventListener('error', e => logErr('page', e.error || e.message));
+  window.addEventListener('unhandledrejection', e => logErr('rejection', e.reason));
   // main() runs setup() then loops forever (asyncified between frames)
-  try { const r = M._main(); if (r && r.catch) r.catch(e => { console.error('MAIN ABORT', e); __simLog.push('abort:' + e); }); runStarted = true; }
-  catch (e) { console.error('sim crash', e); __simLog.push('crash:' + e); }
+  try { const r = M._main(); if (r && r.catch) r.catch(e => { logErr('MAIN ABORT', e); }); runStarted = true; }
+  catch (e) { logErr('crash', e); }
   // landing-page version badges (the sim's own OTA screen does the real check)
   fetch('https://github.com/VYBN3D/WinFloridaGardenSim/releases/latest/download/version.txt')
     .then(r => r.ok ? r.text() : Promise.reject())

@@ -30,10 +30,13 @@ var createGardenSim = (() => {
 // Determine the runtime environment we are in. You can customize this by
 // setting the ENVIRONMENT setting at compile time (see settings.js).
 
-const ENVIRONMENT_IS_WEB = true;
-const ENVIRONMENT_IS_WORKER = false;
-const ENVIRONMENT_IS_NODE = false;
-const ENVIRONMENT_IS_SHELL = false;
+// Attempt to auto-detect the environment
+var ENVIRONMENT_IS_WEB = !!globalThis.window;
+var ENVIRONMENT_IS_WORKER = !!globalThis.WorkerGlobalScope;
+// N.b. Electron.js environment is simultaneously a NODE-environment, but
+// also a web environment.
+var ENVIRONMENT_IS_NODE = globalThis.process?.versions?.node && globalThis.process?.type != 'renderer';
+var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
 
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
@@ -44,6 +47,13 @@ var thisProgram = './this.program';
 var quit_ = (status, toThrow) => {
   throw toThrow;
 };
+
+if (typeof __filename !== 'undefined') { // Node
+  _scriptName = __filename;
+} else
+if (ENVIRONMENT_IS_WORKER) {
+  _scriptName = self.location.href;
+}
 
 // `/` should be present at the end if `scriptDirectory` is not empty
 var scriptDirectory = '';
@@ -56,6 +66,42 @@ function locateFile(path) {
 
 // Hooks that are implemented differently in different runtime environments.
 var readAsync, readBinary;
+
+if (ENVIRONMENT_IS_NODE) {
+
+  // These modules will usually be used on Node.js. Load them eagerly to avoid
+  // the complexity of lazy-loading.
+  var fs = require('node:fs');
+
+  scriptDirectory = __dirname + '/';
+
+// include: node_shell_read.js
+readBinary = (filename) => {
+  // We need to re-wrap `file://` strings to URLs.
+  filename = isFileURI(filename) ? new URL(filename) : filename;
+  var ret = fs.readFileSync(filename);
+  return ret;
+};
+
+readAsync = async (filename, binary = true) => {
+  // See the comment in the `readBinary` function.
+  filename = isFileURI(filename) ? new URL(filename) : filename;
+  var ret = fs.readFileSync(filename, binary ? undefined : 'utf8');
+  return ret;
+};
+// end include: node_shell_read.js
+  if (process.argv.length > 1) {
+    thisProgram = process.argv[1].replace(/\\/g, '/');
+  }
+
+  programArgs = process.argv.slice(2);
+
+  quit_ = (status, toThrow) => {
+    process.exitCode = status;
+    throw toThrow;
+  };
+
+} else
 
 // Note that this includes Node.js workers when relevant (pthreads is enabled).
 // Node.js workers are detected as a combination of ENVIRONMENT_IS_WORKER and
@@ -70,7 +116,37 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
 
   {
 // include: web_or_worker_shell_read.js
-readAsync = async (url) => {
+if (ENVIRONMENT_IS_WORKER) {
+    readBinary = (url) => {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, false);
+      xhr.responseType = 'arraybuffer';
+      xhr.send(null);
+      return new Uint8Array(/** @type{!ArrayBuffer} */(xhr.response));
+    };
+  }
+
+  readAsync = async (url) => {
+    // Fetch has some additional restrictions over XHR, like it can't be used on a file:// url.
+    // See https://github.com/github/fetch/pull/92#issuecomment-140665932
+    // Cordova or Electron apps are typically loaded from a file:// url.
+    // So use XHR on webview if URL is a file URL.
+    if (isFileURI(url)) {
+      return new Promise((resolve, reject) => {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.responseType = 'arraybuffer';
+        xhr.onload = () => {
+          if (xhr.status == 200 || (xhr.status == 0 && xhr.response)) { // file URLs can return 0
+            resolve(xhr.response);
+            return;
+          }
+          reject(xhr.status);
+        };
+        xhr.onerror = reject;
+        xhr.send(null);
+      });
+    }
     var response = await fetch(url, { credentials: 'same-origin' });
     if (response.ok) {
       return response.arrayBuffer();
@@ -152,18 +228,9 @@ var runtimeInitialized = false;
 
 
 
-// When ALLOW_MEMORY_GROWTH is enabled, the conversion from Wasm
-// memory to ArrayBuffer requires some additional logic.
-function getMemoryBuffer() {
-  return wasmMemory.buffer;
-}
-
 function updateMemoryViews() {
-  // If we already have a heap that is resizeable/growable buffer we don't
-  // need to do anything in updateMemoryViews.
-  if (HEAP8?.buffer?.resizable) return;
-  var b = getMemoryBuffer();
-  HEAP8 = new Int8Array(b);
+  var b = wasmMemory.buffer;
+  
   Module['HEAP16'] = HEAP16 = new Int16Array(b);
   Module['HEAPU8'] = HEAPU8 = new Uint8Array(b);
   Module['HEAPU16'] = HEAPU16 = new Uint16Array(b);
@@ -284,6 +351,12 @@ async function instantiateArrayBuffer(binaryFile, imports) {
 
 async function instantiateAsync(binary, binaryFile, imports) {
   if (!binary
+      // Don't use streaming for file:// delivered objects in a webview, fetch them synchronously.
+      && !isFileURI(binaryFile)
+      // Avoid using instantiateStreaming() on Node.js since the `fetch()` API
+      // does not support `file://` URLs.
+      // See: https://github.com/emscripten-core/emscripten/pull/16917
+      && !ENVIRONMENT_IS_NODE
      ) {
     try {
       var response = fetch(binaryFile, { credentials: 'same-origin' });
@@ -368,8 +441,6 @@ async function createWasm() {
         this.status = status;
       }
     }
-  /** @type {!Int8Array} */
-  var HEAP8;
   var callRuntimeCallbacks = (callbacks) => {
       while (callbacks.length > 0) {
         // Pass the module as the first argument.
@@ -445,76 +516,14 @@ async function createWasm() {
   var _emscripten_asm_const_int = (code, sigPtr, argbuf) => {
       return runEmAsmFunction(code, sigPtr, argbuf);
     };
-  var alignMemory = (size, alignment) => {
-      return Math.ceil(size / alignment) * alignment;
-    };
-  var getHeapMax = () =>
-      // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
-      // full 4GB Wasm memories, the size will wrap back to 0 bytes in Wasm side
-      // for any code that deals with heap sizes, which would require special
-      // casing all heap size related code to treat 0 specially.
-      2147483648;
-  var growMemory = (size) => {
-      var oldHeapSize = wasmMemory.buffer.byteLength;
-      var pages = ((size - oldHeapSize + 65535) / 65536) | 0;
-      try {
-        // round size grow request up to wasm page size (fixed 64KB per spec)
-        wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
-        updateMemoryViews();
-        return 1 /*success*/;
-      } catch(e) {
-      }
-      // implicit 0 return to save code size (caller will cast 'undefined' into 0
-      // anyhow)
+  var abortOnCannotGrowMemory = (requestedSize) => {
+      abort('OOM');
     };
   var _emscripten_resize_heap = (requestedSize) => {
       var oldSize = HEAPU8.length;
       // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
       requestedSize >>>= 0;
-      // With multithreaded builds, races can happen (another thread might increase the size
-      // in between), so return a failure, and let the caller retry.
-  
-      // Memory resize rules:
-      // 1.  Always increase heap size to at least the requested size, rounded up
-      //     to next page multiple.
-      // 2a. If MEMORY_GROWTH_LINEAR_STEP == -1, excessively resize the heap
-      //     geometrically: increase the heap size according to
-      //     MEMORY_GROWTH_GEOMETRIC_STEP factor (default +20%), At most
-      //     overreserve by MEMORY_GROWTH_GEOMETRIC_CAP bytes (default 96MB).
-      // 2b. If MEMORY_GROWTH_LINEAR_STEP != -1, excessively resize the heap
-      //     linearly: increase the heap size by at least
-      //     MEMORY_GROWTH_LINEAR_STEP bytes.
-      // 3.  Max size for the heap is capped at 2048MB-WASM_PAGE_SIZE, or by
-      //     MAXIMUM_MEMORY, or by ASAN limit, depending on which is smallest
-      // 4.  If we were unable to allocate as much memory, it may be due to
-      //     over-eager decision to excessively reserve due to (3) above.
-      //     Hence if an allocation fails, cut down on the amount of excess
-      //     growth, in an attempt to succeed to perform a smaller allocation.
-  
-      // A limit is set for how much we can grow. We should not exceed that
-      // (the wasm binary specifies it, so if we tried, we'd fail anyhow).
-      var maxHeapSize = getHeapMax();
-      if (requestedSize > maxHeapSize) {
-        return false;
-      }
-  
-      // Loop through potential heap size increases. If we attempt a too eager
-      // reservation that fails, cut down on the attempted size and reserve a
-      // smaller bump instead. (max 3 times, chosen somewhat arbitrarily)
-      for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
-        var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown); // ensure geometric growth
-        // but limit overreserving (default to capping at +96MB overgrowth at most)
-        overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296 );
-  
-        var newSize = Math.min(maxHeapSize, alignMemory(Math.max(requestedSize, overGrownHeapSize), 65536));
-  
-        var replacement = growMemory(newSize);
-        if (replacement) {
-  
-          return true;
-        }
-      }
-      return false;
+      abortOnCannotGrowMemory(requestedSize);
     };
   const ASYNCIFY_STACK_SIZE = 4096;
   var handleException = (e) => {
@@ -874,6 +883,11 @@ async function createWasm() {
 
 
 
+  /** @type {!Uint16Array} */
+  var HEAPU16;
+  /** @type {!Int16Array} */
+  var HEAP16;
+
 
   var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       // Parameter maxBytesToWrite is not optional. Negative values, 0, null,
@@ -918,23 +932,7 @@ async function createWasm() {
   var stringToUTF8 = (str, outPtr, maxBytesToWrite) => {
       return stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
     };
-  /** @type {!Uint16Array} */
-  var HEAPU16;
 
-  /** @type {!Int16Array} */
-  var HEAP16;
-
-  var getCFunc = (ident) => {
-      var func = Module['_' + ident]; // closure exported function
-      return func;
-    };
-  var runtimeKeepalivePop = () => {
-      runtimeKeepaliveCounter -= 1;
-    };
-  var runtimeKeepalivePush = () => {
-      runtimeKeepaliveCounter += 1;
-    };
-  var stackAlloc = (sz) => __emscripten_stack_alloc(sz);
   var lengthBytesUTF8 = (str) => {
       var len = 0;
       for (var i = 0; i < str.length; ++i) {
@@ -953,86 +951,6 @@ async function createWasm() {
         }
       }
       return len;
-    };
-  var stringToUTF8OnStack = (str) => {
-      var size = lengthBytesUTF8(str) + 1;
-      var ret = stackAlloc(size);
-      stringToUTF8(str, ret, size);
-      return ret;
-    };
-  var writeArrayToMemory = (array, buffer) => {
-      HEAP8.set(array, buffer);
-    };
-  
-    /**
-   * @param {string|null=} returnType
-   * @param {Array=} argTypes
-   * @param {Array=} args
-   * @param {Object=} opts
-   */
-  var ccall = (ident, returnType, argTypes, args, opts) => {
-      // For fast lookup of conversion functions
-      var toC = {
-        'string': (str) => {
-          var ret = 0;
-          if (str !== null && str !== undefined && str !== 0) { // null string
-            ret = stringToUTF8OnStack(str);
-          }
-          return ret;
-        },
-        'array': (arr) => {
-          var ret = stackAlloc(arr.length);
-          writeArrayToMemory(arr, ret);
-          return ret;
-        }
-      };
-  
-      function convertReturnValue(ret) {
-        if (returnType === 'string') {
-          return UTF8ToString(ret);
-        }
-        if (returnType === 'boolean') return Boolean(ret);
-        return ret;
-      }
-  
-      var func = getCFunc(ident);
-      var cArgs = [];
-      var stack = 0;
-      if (args) {
-        for (var i = 0; i < args.length; i++) {
-          var converter = toC[argTypes[i]];
-          if (converter) {
-            if (!stack) stack = stackSave();
-            cArgs[i] = converter(args[i]);
-          } else {
-            cArgs[i] = args[i];
-          }
-        }
-      }
-      // Data for a previous async operation that was in flight before us.
-      var previousAsync = Asyncify.currData;
-      var ret = func(...cArgs);
-      function onDone(ret) {
-        runtimeKeepalivePop();
-        if (stack) stackRestore(stack);
-        return convertReturnValue(ret);
-      }
-    var asyncMode = opts?.async;
-  
-      // Keep the runtime alive through all calls. Note that this call might not be
-      // async, but for simplicity we push and pop in all calls.
-      runtimeKeepalivePush();
-      if (Asyncify.currData != previousAsync) {
-        // This is a new async operation. The wasm is paused and has unwound its stack.
-        // We need to return a Promise that resolves the return value
-        // once the stack is rewound and execution finishes.
-        return Asyncify.whenDone().then(onDone);
-      }
-  
-      ret = onDone(ret);
-      // If this is an async ccall, ensure we return a promise
-      if (asyncMode) return Promise.resolve(ret);
-      return ret;
     };
   var _exit = exitJS;
 // End JS library code
@@ -1064,9 +982,9 @@ if (Module['printErr']) err = Module['printErr'];
 }
 
 // Begin runtime exports
-  Module['ccall'] = ccall;
   Module['UTF8ToString'] = UTF8ToString;
   Module['stringToUTF8'] = stringToUTF8;
+  Module['lengthBytesUTF8'] = lengthBytesUTF8;
   // End runtime exports
   // Begin JS library exports
   // End JS library exports
@@ -1074,15 +992,16 @@ if (Module['printErr']) err = Module['printErr'];
 // end include: postlibrary.js
 
 var ASM_CONSTS = {
-  100196: () => { return Module.t0; },  
- 100218: ($0) => { console.log(UTF8ToString($0)); },  
- 100253: () => { Module.nvsClear(); }
+  100479: () => { return Module.t0; },  
+ 100501: ($0) => { console.log(UTF8ToString($0)); },  
+ 100536: ($0) => { Module.wireReq = (Module.wireReq | 0) + 1; Module.wireLastReg = $0; },  
+ 100608: () => { Module.nvsClear(); }
 };
 function js_mark_dirty() { if (Module.gardenDirty !== undefined) Module.gardenDirty = true; }
 function js_sleep_screen(on) { if (Module.onDisplayPower) Module.onDisplayPower(!!on); }
 function js_audio_push(p,frames) { Module.audioPush(p, frames); }
 function js_audio_level() { return Module.audioLevel ? Module.audioLevel() : 1.0; }
-function js_touch_count() { return Module.touchCount() | 0; }
+function js_touch_count() { var v = Module.touchCount() | 0; Module.tcCalls = (Module.tcCalls | 0) + 1; Module.tcLast = v; return v; }
 function js_touch_point(out) { Module.touchPanelPoint(out); }
 function js_boot_pressed() { return Module.bootPressed() ? 1 : 0; }
 function js_now() { return Date.now(); }
@@ -1092,11 +1011,13 @@ function js_fetch_get(url,bodyOut,bodyMax) { return Asyncify.handleSleep(functio
 function js_reload() { if (Module.onReboot) Module.onReboot(); }
 function js_set_invert(i) { if (Module.onInvert) Module.onInvert(!!i); }
 function js_amp(on) { if (Module.onAmp) Module.onAmp(!!on); }
+function js_sleep_beat(ms) { Module.sleeps = (Module.sleeps | 0) + 1; Module.lastSleepMs = ms; Module.lastSleepAt = Date.now(); var h = Module.sleepHist || (Module.sleepHist = {}); h[ms] = (h[ms] || 0) + 1; }
 
 // Imports from the Wasm binary.
 var _malloc,
   _free,
   _garden_fb_ptr,
+  _garden_millis,
   _main,
   _setThrew,
   __emscripten_stack_restore,
@@ -1119,6 +1040,7 @@ function assignWasmExports(wasmExports) {
   _malloc = wasmExports['malloc'];
   _free = wasmExports['free'];
   _garden_fb_ptr = Module['_garden_fb_ptr'] = wasmExports['garden_fb_ptr'];
+  _garden_millis = Module['_garden_millis'] = wasmExports['garden_millis'];
   _main = Module['_main'] = wasmExports['main'];
   _setThrew = wasmExports['setThrew'];
   __emscripten_stack_restore = wasmExports['_emscripten_stack_restore'];
@@ -1163,6 +1085,8 @@ var wasmImports = {
   js_nvs_set,
   /** @export */
   js_reload,
+  /** @export */
+  js_sleep_beat,
   /** @export */
   js_sleep_screen,
   /** @export */
