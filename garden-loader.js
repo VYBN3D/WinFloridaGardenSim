@@ -230,6 +230,8 @@ async function toggleFs() {
   }
 }
 if (fsBtn) fsBtn.addEventListener('click', toggleFs);
+const fsExit = document.getElementById('fsExit');
+if (fsExit) fsExit.addEventListener('click', toggleFs);
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement) { device.classList.remove('fs'); if (fsBtn) fsBtn.textContent = '⛶ FULLSCREEN'; }
 });
