@@ -1593,14 +1593,38 @@ const strainHashValue = [25,35,35,35,35,35,35,50,50,50,50,50,50,50,80,80];
 // ---- fullscreen (native API + orientation lock, CSS fallback for iOS) ----
 const device = document.getElementById('device'), fsBtn = document.getElementById('fsBtn');
 function isFs() { return (document.fullscreenElement === device) || device.classList.contains('fs'); }
+// Page lock while fullscreen: phones scroll/pinch-zoom/double-tap-zoom out of
+// the fullscreen view otherwise (iOS Safari especially). Block all gestures.
+let fsGestureBlock = null;
+function fsLockOn() {
+  document.documentElement.style.overflow = 'hidden';
+  document.body.style.overflow = 'hidden';
+  const stop = e => { e.preventDefault(); };
+  document.addEventListener('touchmove', stop, { passive: false });
+  document.addEventListener('gesturestart', stop, { passive: false });
+  document.addEventListener('gesturechange', stop, { passive: false });
+  fsGestureBlock = stop;
+}
+function fsLockOff() {
+  document.documentElement.style.overflow = '';
+  document.body.style.overflow = '';
+  if (fsGestureBlock) {
+    document.removeEventListener('touchmove', fsGestureBlock);
+    document.removeEventListener('gesturestart', fsGestureBlock);
+    document.removeEventListener('gesturechange', fsGestureBlock);
+    fsGestureBlock = null;
+  }
+}
 async function toggleFs() {
   if (isFs()) {
     try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) {}
     device.classList.remove('fs');
     try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
     fsBtn.textContent = '⛶ FULLSCREEN';
+    fsLockOff();
     return;
   }
+  fsLockOn();
   try {
     if (device.requestFullscreen) {
       await device.requestFullscreen({ navigationUI: 'hide' });
@@ -1617,7 +1641,8 @@ if (fsBtn) fsBtn.addEventListener('click', toggleFs);
 const fsExit = document.getElementById('fsExit');
 if (fsExit) fsExit.addEventListener('click', toggleFs);
 document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) { device.classList.remove('fs'); if (fsBtn) fsBtn.textContent = '⛶ FULLSCREEN'; }
+  if (!document.fullscreenElement) { device.classList.remove('fs'); if (fsBtn) fsBtn.textContent = '⛶ FULLSCREEN'; fsLockOff(); }
+  else fsLockOn();
 });
 
 // ---- boot the firmware ----
