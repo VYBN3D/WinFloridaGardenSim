@@ -63,10 +63,13 @@ const NVS_KEY = 'wfg-nvs-v42-S3';
 let nvs = {};
 try { nvs = JSON.parse(localStorage.getItem(NVS_KEY) || '{}'); } catch (e) { nvs = {}; }
 let nvsTimer = null;
-function nvsFlush() {
+function nvsFlush(immediate) {
   clearTimeout(nvsTimer);
-  nvsTimer = setTimeout(() => { try { localStorage.setItem(NVS_KEY, JSON.stringify(nvs)); } catch (e) {} }, 250);
+  const write = () => { try { localStorage.setItem(NVS_KEY, JSON.stringify(nvs)); } catch (e) {} };
+  if (immediate) write(); else nvsTimer = setTimeout(write, 250);
 }
+document.addEventListener('visibilitychange', () => { if (document.hidden) nvsFlush(true); });
+window.addEventListener('pagehide', () => nvsFlush(true));
 
 // ---- touch / boot state ----
 let touchPanelX = 0, touchPanelY = 0, touchDown = false, bootDown = false;
@@ -129,17 +132,83 @@ const INV_LUT = new Uint32Array(65536);
 for (let c = 0; c < 65536; c++) INV_LUT[c] = LUT[c ^ 0xFFFF];
 function blit() {
   if (!sim) return;
+  // The framebuffer is a static array inside the wasm module — read it at the
+  // address the shim exported, never at offset 0.
+  const fbBase = sim._garden_fb_ptr() >> 1;
   const fb = sim.HEAPU16, N = PANEL_W * PANEL_H;
   const lut = invert ? INV_LUT : LUT;
-  for (let i = 0; i < N; i++) pix32[i] = lut[fb[i]];
+  for (let i = 0; i < N; i++) pix32[i] = lut[fb[fbBase + i]];
   sctx.putImageData(img, 0, 0);
 }
 
 function rafLoop() {
-  if (runStarted && blitDirty) { blit(); blitDirty = false; }
+  if (runStarted && sim) blit();   // blit every frame — the sim redraws async inside wasm
   requestAnimationFrame(rafLoop);
 }
 requestAnimationFrame(rafLoop);
+
+// ---- hero leaf + version badge ----
+const LEAF = new Uint8Array([0,0,0,0,0,0,0,127,128,1,255,224,7,128,120,14,0,28,28,0,12,24,0,192,56,31,192,48,120,128,48,193,128,49,129,128,49,1,128,49,33,0,50,67,0,26,198,0,24,140,0,28,248,12,13,240,28,3,0,120,7,255,224,14,127,128,0,0,0,0,0,0]);
+(function heroLeaf() {
+  const cv = document.getElementById('leafCv');
+  if (!cv) return;
+  const lc = cv.getContext('2d');
+  lc.fillStyle = '#46d47e';
+  for (let r = 0; r < 24; r++) for (let c = 0; c < 24; c++)
+    if (LEAF[(r * 24 + c) >> 3] & (0x80 >> ((r * 24 + c) & 7))) lc.fillRect(c, r, 1, 1);
+})();
+
+// ---- strain catalog table (exact firmware data) ----
+const strainNames = ["Northern Lights","Blue Dream","Banana Papaya","Superbuff Cherry","Jack Herer","Granddaddy Purple","White Widow","Blue Lobster","OG Kush","Sour Diesel","Gelato","Titan Express","Zesty Garlic Cookies","Moon Beam Gelato","Toad Venom","Foreign Kushmints"];
+const strainType = ["INDICA","SATIVA","HYBRID","HYBRID","SATIVA","INDICA","HYBRID","HYBRID","INDICA","SATIVA","HYBRID","HYBRID","HYBRID","HYBRID","HYBRID","INDICA"];
+const strainNotes = ["Earthy pine body calm","Sweet berry heady lift","Tropical banana cream","Cherry gas social buzz","Pine citrus bright focus","Grape berry cozy body","Pepper earth steady buzz","Blue candy gas","Fuel pine couch calm","Diesel citrus daytime fuel","Creamy dessert calm","Fast gas express rush","Garlic cookie funk","Moonlit cream dessert","Swamp funk mind melt","Minty gas deep melt"];
+const strainDifficulty = ["EASY","MEDIUM","MEDIUM","MEDIUM","MEDIUM","MEDIUM","MEDIUM","HARD","HARD","HARD","HARD","HARD","HARD","HARD","EXPERT","EXPERT"];
+const strainPace = [1,0,0,0,0,0,0,-1,-1,-1,-1,-1,-1,-1,-2,-2];
+const strainThirst = [14,18,18,18,18,18,18,24,24,24,24,24,24,24,32,32];
+const strainSeedPrice = [8,12,12,12,12,12,12,18,18,18,18,18,18,18,30,30];
+const strainFlowerValue = [10,14,14,14,14,14,14,20,20,20,20,20,20,20,32,32];
+const strainHashValue = [25,35,35,35,35,35,35,50,50,50,50,50,50,50,80,80];
+(function fillStrains() {
+  const tb = document.getElementById('strainTable');
+  if (!tb) return;
+  tb.innerHTML = '<tr><th>STRAIN</th><th>TYPE</th><th>SEED</th><th>FLOWER</th><th>HASH</th><th>PACE</th><th>DIFFICULTY</th></tr>';
+  const paceTxt = p => p > 0 ? '+' + p + ' FAST' : p < 0 ? p + ' SLOW' : 'NORMAL';
+  strainNames.forEach((n, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><b>${n}</b><br><small>${strainNotes[i]}</small></td><td>${strainType[i]}</td>` +
+      `<td>$${strainSeedPrice[i]}</td><td>$${strainFlowerValue[i]}</td><td>$${strainHashValue[i]}</td>` +
+      `<td>${paceTxt(strainPace[i])} · ${strainThirst[i]}% thirst</td><td>${strainDifficulty[i]}</td>`;
+    tb.appendChild(tr);
+  });
+})();
+
+// ---- fullscreen (native API + orientation lock, CSS fallback for iOS) ----
+const device = document.getElementById('device'), fsBtn = document.getElementById('fsBtn');
+function isFs() { return (document.fullscreenElement === device) || device.classList.contains('fs'); }
+async function toggleFs() {
+  if (isFs()) {
+    try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (e) {}
+    device.classList.remove('fs');
+    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
+    fsBtn.textContent = '⛶ FULLSCREEN';
+    return;
+  }
+  try {
+    if (device.requestFullscreen) {
+      await device.requestFullscreen({ navigationUI: 'hide' });
+      try { if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape'); } catch (e) {}
+    } else throw new Error('no native fs');
+    fsBtn.textContent = '✕ EXIT';
+  } catch (e) {
+    device.classList.add('fs');       // iOS: pseudo-fullscreen
+    try { if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape'); } catch (e2) {}
+    fsBtn.textContent = '✕ EXIT';
+  }
+}
+if (fsBtn) fsBtn.addEventListener('click', toggleFs);
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) { device.classList.remove('fs'); if (fsBtn) fsBtn.textContent = '⛶ FULLSCREEN'; }
+});
 
 // ---- boot the firmware ----
 createGardenSim({
@@ -175,12 +244,14 @@ createGardenSim({
   // main() runs setup() then loops forever (asyncified between frames)
   try { const r = M._main(); if (r && r.catch) r.catch(e => { console.error('MAIN ABORT', e); __simLog.push('abort:' + e); }); runStarted = true; }
   catch (e) { console.error('sim crash', e); __simLog.push('crash:' + e); }
-  // landing-page version badge (the sim's own OTA screen does the real check)
+  // landing-page version badges (the sim's own OTA screen does the real check)
   fetch('https://github.com/VYBN3D/WinFloridaGardenSim/releases/latest/download/version.txt')
     .then(r => r.ok ? r.text() : Promise.reject())
     .then(t => {
       const v = t.trim();
       const el = document.getElementById('verNum');
+      const ab = document.getElementById('aboutVer');
       if (el) el.textContent = v + '-S3';
+      if (ab) ab.textContent = v + '-S3';
     }).catch(() => {});
 });

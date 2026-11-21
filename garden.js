@@ -167,7 +167,7 @@ function updateMemoryViews() {
   Module['HEAP16'] = HEAP16 = new Int16Array(b);
   Module['HEAPU8'] = HEAPU8 = new Uint8Array(b);
   Module['HEAPU16'] = HEAPU16 = new Uint16Array(b);
-  HEAP32 = new Int32Array(b);
+  Module['HEAP32'] = HEAP32 = new Int32Array(b);
   HEAPU32 = new Uint32Array(b);
   
   HEAPF64 = new Float64Array(b);
@@ -923,6 +923,7 @@ async function createWasm() {
 
   /** @type {!Int16Array} */
   var HEAP16;
+
   var getCFunc = (ident) => {
       var func = Module['_' + ident]; // closure exported function
       return func;
@@ -1095,6 +1096,7 @@ function js_amp(on) { if (Module.onAmp) Module.onAmp(!!on); }
 // Imports from the Wasm binary.
 var _malloc,
   _free,
+  _garden_fb_ptr,
   _main,
   _setThrew,
   __emscripten_stack_restore,
@@ -1116,6 +1118,7 @@ var _malloc,
 function assignWasmExports(wasmExports) {
   _malloc = wasmExports['malloc'];
   _free = wasmExports['free'];
+  _garden_fb_ptr = Module['_garden_fb_ptr'] = wasmExports['garden_fb_ptr'];
   _main = Module['_main'] = wasmExports['main'];
   _setThrew = wasmExports['setThrew'];
   __emscripten_stack_restore = wasmExports['_emscripten_stack_restore'];
