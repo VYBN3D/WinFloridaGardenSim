@@ -1424,7 +1424,10 @@ function logErr(where, e) {
   try { window.__simLog.push(where + ': ' + (e && (e.message || e))); } catch (x) {}
 }
 function startAudio() {
-  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  if (AC) {
+    if (AC.state === 'suspended') { AC.resume(); iosUnlock(); }
+    return;
+  }
   try {
     AC = new (window.AudioContext || window.webkitAudioContext)();
     // Start at the freshest audio — anything already queued is stale.
@@ -1455,9 +1458,34 @@ function startAudio() {
     g = AC.createGain(); g.gain.value = ampOn ? 0.8 : 0;
     spn.connect(g); g.connect(AC.destination);
     AC.resume();
+    iosUnlock();   // iOS: a resume alone is not enough on some builds
   } catch (e) {}
 }
+
+// iOS Safari only unwedges WebAudio when a short buffer is played from
+// inside the same gesture that created/resumed the context — and that
+// gesture must be touchend/click (pointerdown is not always honored).
+function iosUnlock() {
+  try {
+    if (!AC || AC.state === 'suspended') return;
+    if (!iosUnlock._buf) {
+      iosUnlock._buf = AC.createBuffer(1, 1, AC.sampleRate);
+      iosUnlock._buf.getChannelData(0)[0] = 0;   // one silent sample
+    }
+    const src = AC.createBufferSource();
+    src.buffer = iosUnlock._buf;
+    src.connect(AC.destination);
+    src.start(0);
+  } catch (e) {}
+}
+// touchend + click unlock audio on iOS; pointerdown covers desktop/Android.
+window.addEventListener('touchend', startAudio, { once: false, passive: true });
+window.addEventListener('click', startAudio, { once: false });
 window.addEventListener('pointerdown', startAudio, { once: false });
+// iOS pauses audio contexts when the tab backgrounds; re-kick on return.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && AC && AC.state === 'suspended') { AC.resume(); iosUnlock(); }
+});
 
 // ---- NVS (Preferences) → localStorage ----
 const NVS_KEY = 'wfg-nvs-v42-S3';
