@@ -56,20 +56,22 @@ function startAudio() {
       const oL = e.outputBuffer.getChannelData(0);
       const oR = e.outputBuffer.getChannelData(1);
       const step = AUD_RATE / AC.sampleRate;
-      // If the sim has fallen behind, skip the backlog so audio stays in sync.
+      // Keep the read cursor inside audio actually supplied by the firmware.
+      if (ringRd > ringW) ringRd = ringW;
       if (ringW - ringRd > AUD_RATE) ringRd = ringW - AUD_RATE;
       let n = 0;
+      const available = Math.max(0, ringW - ringRd);
       for (let i = 0; i < oL.length; i++) {
         rpos += step;
         while (rpos >= 1) { rpos -= 1; n++; }
         let L = 0, R = 0;
-        if (ringRd + n < ringW) {
-          L = ringL[(ringRd + n) % RING_N];
-          R = ringR[(ringRd + n) % RING_N];
+        if (n < available) {
+          const idx = (ringRd + n) % RING_N;
+          L = ringL[idx]; R = ringR[idx];
         }
         oL[i] = L; oR[i] = R;
       }
-      ringRd += n;
+      ringRd += Math.min(n, available);
     };
     g = AC.createGain(); g.gain.value = ampOn ? 0.8 : 0;
     spn.connect(g); g.connect(AC.destination);
