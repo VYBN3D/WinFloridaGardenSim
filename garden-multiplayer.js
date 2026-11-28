@@ -7,9 +7,10 @@ const GAME = document.body.dataset.multiplayerGame || "Garden Sim";
 const ECONOMY_KEY = "Garden";
 const TOPIC = "garden-nearby-v2";
 const STORAGE_NAME = "garden-mp-display-name-v1";
+const STORAGE_REMEMBER = "garden-mp-remember-me-v1";
 
 const css = document.createElement("style");
-css.textContent = "body.gardenFullscreen #gardenMp{display:none!important}\n#gardenMp{position:fixed;right:16px;bottom:16px;width:min(440px,calc(100vw - 24px));max-height:min(82vh,760px);z-index:99999;box-sizing:border-box;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#e8f5eb;pointer-events:auto}\n#gardenMp[hidden]{display:none!important}\n#gardenMp .mpTab{display:block;margin:0 0 0 auto;padding:9px 13px;border-radius:9px;background:rgba(7,20,12,.96);box-shadow:0 3px 14px #0008;font-weight:700;letter-spacing:.3px}\n#gardenMp .mpPanel{box-sizing:border-box;border:1px solid #477451;border-radius:10px;background:rgba(7,20,12,.97);padding:13px;display:flex;flex-direction:column;gap:9px;box-shadow:0 5px 24px #000a;min-height:170px;max-height:inherit;overflow-y:auto}\n#gardenMp.mpCollapsed .mpPanel{display:none}\n#gardenMp.mpExpanded .mpTab{display:none}\n#gardenMp .mpHead{display:flex;gap:10px;justify-content:space-between;align-items:center;color:#b9f0c8;font-weight:700;letter-spacing:.5px;font-size:13px}\n#gardenMp .mpStatus{color:#b6cdbb;font-size:11px;min-height:15px;white-space:normal;overflow-wrap:anywhere}\n#gardenMp .mpStatus[data-state=\"online\"]{color:#72e69a}\n#gardenMp .mpControls{display:flex;gap:6px;min-height:32px}\n#gardenMp input{min-width:0;flex:1;background:#101f15;color:#effff2;border:1px solid #45684d;border-radius:6px;padding:6px 8px;font:12px ui-monospace,monospace}\n#gardenMp button{background:#205a34;color:#eaffef;border:1px solid #5b956a;border-radius:6px;padding:6px 10px;font:12px ui-monospace,monospace;cursor:pointer;white-space:nowrap}\n#gardenMp button:disabled{opacity:.5}\n#gardenMp .mpCount{color:#a5d6b0;font-size:11px}\n#gardenMp ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:5px;overflow:visible;min-height:30px;flex:0 0 auto}\n#gardenMp li{margin:0;min-width:0}\n#gardenMp .mpPlayer{width:100%;min-height:42px;display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left;padding:9px 10px;border-color:#345c40;background:#102318;overflow:hidden}\n#gardenMp .mpPlayer[aria-pressed=\"true\"]{background:#245b37;border-color:#82d99b}\n#gardenMp .mpName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n#gardenMp .mpGame{color:#9ab9a2;font-size:10px;white-space:nowrap}\n#gardenMp .mpChatHead{color:#b9f0c8;font-size:11px;font-weight:700;border-top:1px solid #345c40;padding-top:7px}\n#gardenMp #mpBadge{margin-left:auto;white-space:nowrap}\n#gardenMp .mpDmToggle{margin-left:0}\n#gardenMp .mpDmView{display:none;border-top:1px solid #345c40;padding-top:9px;gap:8px}\n#gardenMp.mpDmOpen .mpDmView{display:flex;flex-direction:column}\n#gardenMp.mpDmOpen .mpEconomy{display:none}\n#gardenMp.mpDmOpen .mpDmToggle{background:#173d25}\n#gardenMp .mpDmToolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#b9f0c8;font-weight:700;font-size:11px}\n#gardenMp #mpChatLog{height:82px;overflow:auto;background:#09160e;border:1px solid #294a33;border-radius:6px;padding:6px;font-size:11px}\n#gardenMp .mpChatLine{overflow-wrap:anywhere;margin:0 0 5px}\n#gardenMp .mpChatLine b{color:#9de8b0}\n#gardenMp .mpEconomy{border-top:1px solid #345c40;padding-top:8px;display:grid;gap:6px}\n#gardenMp .mpEconomyTitle{color:#b9f0c8;font-weight:700;font-size:11px}\n#gardenMp .mpBalances{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;color:#b6cdbb;font-size:10px}\n#gardenMp .mpBalances strong{color:#effff2;font-weight:700}\n#gardenMp .mpTransfer{display:grid;grid-template-columns:1.25fr 1.4fr 58px auto;gap:4px}\n#gardenMp select,#gardenMp .mpAmount{min-width:0;background:#101f15;color:#effff2;border:1px solid #45684d;border-radius:6px;padding:6px 5px;font:11px ui-monospace,monospace}\n#gardenMp .mpTransfer button{padding:6px 8px}\n#gardenMp .mpToast{display:none;position:relative;z-index:2;padding:10px 12px;border:1px solid #65bd7b;border-radius:8px;background:linear-gradient(110deg,rgba(20,75,39,.98),rgba(9,35,20,.98));box-shadow:0 4px 18px #0009;color:#effff2;font-size:12px;line-height:1.45;pointer-events:none;animation:mpToastIn .18s ease-out}\n#gardenMp .mpToast.isVisible{display:block}\n#gardenMp .mpToast strong{display:block;color:#a8f5b9;font-size:14px}\n@keyframes mpToastIn{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}\n@media(max-width:520px){#gardenMp{right:8px;bottom:8px;width:calc(100vw - 16px);max-height:84vh}#gardenMp .mpTransfer{grid-template-columns:1fr 1fr 64px auto}#gardenMp .mpPlayer{min-height:46px}}";
+css.textContent = "body.gardenFullscreen #gardenMp{display:none!important}\n#gardenMp{position:fixed;right:16px;bottom:16px;width:min(440px,calc(100vw - 24px));max-height:min(82vh,760px);z-index:99999;box-sizing:border-box;font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#e8f5eb;pointer-events:auto}\n#gardenMp[hidden]{display:none!important}\n#gardenMp .mpTab{display:block;margin:0 0 0 auto;padding:9px 13px;border-radius:9px;background:rgba(7,20,12,.96);box-shadow:0 3px 14px #0008;font-weight:700;letter-spacing:.3px}\n#gardenMp .mpPanel{box-sizing:border-box;border:1px solid #477451;border-radius:10px;background:rgba(7,20,12,.97);padding:13px;display:flex;flex-direction:column;gap:9px;box-shadow:0 5px 24px #000a;min-height:170px;max-height:inherit;overflow-y:auto}\n#gardenMp.mpCollapsed .mpPanel{display:none}\n#gardenMp.mpExpanded .mpTab{display:none}\n#gardenMp .mpHead{display:flex;gap:10px;justify-content:space-between;align-items:center;color:#b9f0c8;font-weight:700;letter-spacing:.5px;font-size:13px}\n#gardenMp .mpStatus{color:#b6cdbb;font-size:11px;min-height:15px;white-space:normal;overflow-wrap:anywhere}\n#gardenMp .mpStatus[data-state=\"online\"]{color:#72e69a}\n#gardenMp .mpControls{display:flex;gap:6px;min-height:32px}\n#gardenMp input{min-width:0;flex:1;background:#101f15;color:#effff2;border:1px solid #45684d;border-radius:6px;padding:6px 8px;font:12px ui-monospace,monospace}\n#gardenMp button{background:#205a34;color:#eaffef;border:1px solid #5b956a;border-radius:6px;padding:6px 10px;font:12px ui-monospace,monospace;cursor:pointer;white-space:nowrap}\n#gardenMp button:disabled{opacity:.5}\n#gardenMp .mpCount{color:#a5d6b0;font-size:11px}\n#gardenMp ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:5px;overflow:visible;min-height:30px;flex:0 0 auto}\n#gardenMp li{margin:0;min-width:0}\n#gardenMp .mpPlayer{width:100%;min-height:42px;display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left;padding:9px 10px;border-color:#345c40;background:#102318;overflow:hidden}\n#gardenMp .mpPlayer[aria-pressed=\"true\"]{background:#245b37;border-color:#82d99b}\n#gardenMp .mpName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n#gardenMp .mpLive{display:inline-block;flex:0 0 8px;width:8px;height:8px;border-radius:50%;background:#58e887;box-shadow:0 0 7px #58e887;vertical-align:middle;margin-right:7px}\n#gardenMp .mpRemember{display:flex;align-items:center;gap:7px;color:#b6cdbb;font-size:11px;line-height:1.3;cursor:pointer}\n#gardenMp .mpRemember input{flex:0 0 auto;width:14px;height:14px;margin:0;accent-color:#58e887}\n#gardenMp .mpGame{color:#9ab9a2;font-size:10px;white-space:nowrap}\n#gardenMp .mpChatHead{color:#b9f0c8;font-size:11px;font-weight:700;border-top:1px solid #345c40;padding-top:7px}\n#gardenMp #mpBadge{margin-left:auto;white-space:nowrap}\n#gardenMp .mpDmToggle{margin-left:0}\n#gardenMp .mpDmView{display:none;border-top:1px solid #345c40;padding-top:9px;gap:8px}\n#gardenMp.mpDmOpen .mpDmView{display:flex;flex-direction:column}\n#gardenMp.mpDmOpen .mpEconomy{display:none}\n#gardenMp.mpDmOpen .mpDmToggle{background:#173d25}\n#gardenMp .mpDmToolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#b9f0c8;font-weight:700;font-size:11px}\n#gardenMp #mpChatLog{height:82px;overflow:auto;background:#09160e;border:1px solid #294a33;border-radius:6px;padding:6px;font-size:11px}\n#gardenMp .mpChatLine{overflow-wrap:anywhere;margin:0 0 5px}\n#gardenMp .mpChatLine b{color:#9de8b0}\n#gardenMp .mpEconomy{border-top:1px solid #345c40;padding-top:8px;display:grid;gap:6px}\n#gardenMp .mpEconomyTitle{color:#b9f0c8;font-weight:700;font-size:11px}\n#gardenMp .mpBalances{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;color:#b6cdbb;font-size:10px}\n#gardenMp .mpBalances strong{color:#effff2;font-weight:700}\n#gardenMp .mpTransfer{display:grid;grid-template-columns:1.25fr 1.4fr 58px auto;gap:4px}\n#gardenMp select,#gardenMp .mpAmount{min-width:0;background:#101f15;color:#effff2;border:1px solid #45684d;border-radius:6px;padding:6px 5px;font:11px ui-monospace,monospace}\n#gardenMp .mpTransfer button{padding:6px 8px}\n#gardenMp .mpToast{display:none;position:relative;z-index:2;padding:10px 12px;border:1px solid #65bd7b;border-radius:8px;background:linear-gradient(110deg,rgba(20,75,39,.98),rgba(9,35,20,.98));box-shadow:0 4px 18px #0009;color:#effff2;font-size:12px;line-height:1.45;pointer-events:none;animation:mpToastIn .18s ease-out}\n#gardenMp .mpToast.isVisible{display:block}\n#gardenMp .mpToast strong{display:block;color:#a8f5b9;font-size:14px}\n@keyframes mpToastIn{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}\n@media(max-width:520px){#gardenMp{right:8px;bottom:8px;width:calc(100vw - 16px);max-height:84vh}#gardenMp .mpTransfer{grid-template-columns:1fr 1fr 64px auto}#gardenMp .mpPlayer{min-height:46px}}";
 document.head.append(css);
 
 const root = document.createElement("section");
@@ -19,6 +20,7 @@ root.innerHTML = `
   <div class="mpHead"><span>ONLINE GROWERS</span><span id="mpBadge">OFFLINE</span><button id="mpClose" type="button" aria-label="Close Nearby Growers">CLOSE</button><button class="mpDmToggle" id="mpDmToggle" type="button" aria-expanded="false">DIRECT MESSAGE</button></div>
   <div class="mpStatus" id="mpStatus" data-state="offline">Join the shared lobby</div>
   <div class="mpControls"><input id="mpName" maxlength="24" autocomplete="nickname" placeholder="Grower name"><button id="mpJoin" type="button">JOIN</button></div>
+  <label class="mpRemember"><input id="mpRemember" type="checkbox"> Remember me and auto-join next time</label>
   <div class="mpCount" id="mpCount">0 online</div>
   <ul id="mpPlayers"><li>Online players appear here</li></ul>
   <div class="mpDmView" id="mpDmView">
@@ -56,6 +58,8 @@ function isUuid(value) {
 }
 let id = "";
 $("mpName").value = localStorage.getItem(STORAGE_NAME) || "";
+$("mpRemember").checked = localStorage.getItem(STORAGE_REMEMBER) === "1";
+$("mpRemember").addEventListener("change", () => localStorage.setItem(STORAGE_REMEMBER, $("mpRemember").checked ? "1" : "0"));
 let client, channel, joined = false, selectedPlayerId = "";
 let nativeSyncReady = false, nativeSyncBlocked = false, nativeSyncRunning = false;
 let nativeSyncTimer = 0, nativeSyncAgain = false;
@@ -119,13 +123,21 @@ function renderPlayers() {
     button.type = "button";
     button.className = "mpPlayer";
     button.setAttribute("aria-pressed", String(selectedPlayerId === p.player_id));
+    const nameWrap = document.createElement("span");
+    nameWrap.style.cssText = "display:flex;align-items:center;min-width:0;overflow:hidden";
+    const live = document.createElement("span");
+    live.className = "mpLive";
+    live.setAttribute("role", "img");
+    live.setAttribute("aria-label", "Online");
+    live.title = "Online now";
     const name = document.createElement("span");
     name.className = "mpName";
     name.textContent = (p.player_id === id ? p.display_name + " (you)" : p.display_name || "Grower");
+    nameWrap.append(live, name);
     const game = document.createElement("span");
     game.className = "mpGame";
     game.textContent = p.game || "Garden";
-    button.append(name, game);
+    button.append(nameWrap, game);
     button.addEventListener("click", () => {
       selectedPlayerId = p.player_id;
       renderPlayers();
@@ -162,6 +174,7 @@ async function joinLobby() {
   $("mpJoin").disabled = true;
   setStatus("Connecting to shared lobby…", "connecting");
   localStorage.setItem(STORAGE_NAME, name);
+  localStorage.setItem(STORAGE_REMEMBER, $("mpRemember").checked ? "1" : "0");
   try {
     client ||= createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
       realtime: { params: { eventsPerSecond: 10 } }
@@ -561,3 +574,11 @@ $("mpName").addEventListener("keydown", (event) => {
 window.addEventListener("beforeunload", () => {
   if (channel) channel.untrack();
 });
+
+// Restore the lobby only when the player explicitly enabled Remember Me.
+// Supabase Presence still determines whether the player is actually online.
+if ($("mpRemember").checked && $("mpName").value.trim()) {
+  setTimeout(() => {
+    if (!joined && !channel) joinLobby();
+  }, 250);
+}
