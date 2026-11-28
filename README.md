@@ -88,9 +88,11 @@ No board? No problem. The firmware's grow-room core runs as a **web emulator**:
 - **Tracks the firmware releases**: the OPTIONS → build tag is checked against
   the latest `version.txt` from this repo's releases.
 
-The emulator ships from the `gh-pages` branch of this repo; pushing an updated
-build there updates the page. A plain-text link manifest is kept up to date
-alongside it.
+The emulator is compiled automatically from `firmware/WinFloridaGardenSim_S3.ino`
+when `main` is updated. GitHub Actions publishes only the generated WebAssembly
+artifacts to `gh-pages`; the landing page and Supabase Nearby Growers interface
+remain presentation/integration code, not a second copy of the game.
+A plain-text link manifest is kept up to date alongside it.
 
 ## Supported boards
 
@@ -136,8 +138,8 @@ The classic CYD uses the default ESP32 FQBN with `User_Setup_classic.h`.
 
 ### First launch
 
-1. **Pick a grower.** Ten characters — including a stubbled grower named
-   Benji — each get a name you can change from the grower menu.
+1. **Pick a grower.** Fifteen characters, including Bruce, Felix, Sammie,
+   Bradley, and Ashley, each get a name you can change from the grower menu.
 2. **Pick your first strain.** Northern Lights (EASY, $8) is the starting
    pack; the rest of the catalog unlocks as you successfully harvest.
 3. **Plant the room.** Tap the 4 pots (or just tap once — the tray fills).

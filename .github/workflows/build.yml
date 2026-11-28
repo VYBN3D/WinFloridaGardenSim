@@ -1,4 +1,4 @@
-# Builds all three board firmwares with arduino-cli.
+# Builds both S3 board firmwares with arduino-cli.
 # - Push to main: build only (artifacts).
 # - Push a tag (v14, v15, ...): build AND publish a GitHub Release with the
 #   .bin files + a version.txt manifest — what the devices' OTA check reads.
@@ -61,6 +61,75 @@ jobs:
         with:
           name: ${{ matrix.sketch }}
           path: firmware/build/${{ matrix.sketch }}/${{ matrix.sketch }}.ino.bin
+
+      - name: Generate browser source with Arduino's prototype preprocessor
+        if: matrix.sketch == 'WinFloridaGardenSim_S3'
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          arduino-cli compile --preprocess \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB" \
+            firmware/work/WinFloridaGardenSim_S3 \
+            > firmware/build/WinFloridaGardenSim_S3/webport-sketch.cpp
+
+      - name: Upload preprocessed WebPort source
+        if: matrix.sketch == 'WinFloridaGardenSim_S3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: webport-source
+          path: firmware/build/WinFloridaGardenSim_S3/webport-sketch.cpp
+
+
+  # The WebPort game is not a second codebase. Compile the canonical S3
+  # firmware source through the browser HAL, then publish only its artifacts.
+  webport:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: webport
+      - uses: actions/download-artifact@v4
+        with:
+          name: webport-source
+          path: ${{ runner.temp }}/webport-source
+      - name: Compile WebPort from canonical firmware source
+        run: >-
+          FIRMWARE_PREPROCESSED_SOURCE="${RUNNER_TEMP}/webport-source/webport-sketch.cpp"
+          scripts/build-webport.sh "$GITHUB_WORKSPACE/webport"
+      - name: Publish generated emulator artifacts to gh-pages
+        run: |
+          cd webport
+          python3 - "$GITHUB_SHA" <<'PYCODE'
+          from pathlib import Path
+          import re, sys
+          version = sys.argv[1][:12]
+          page = Path("index.html")
+          html = page.read_text()
+          script = f'<script src="./garden.js?v={version}"></script>'
+          html, replaced = re.subn(r'<script>var createGardenSim=.*?</script>', script, html, count=1, flags=re.S)
+          if not replaced:
+              html, replaced = re.subn(r'<script src="\./garden\.js(?:\?v=[^"]*)?"></script>', script, html, count=1)
+          if not replaced:
+              raise SystemExit("Could not find the WebAssembly loader script slot in gh-pages/index.html")
+          html = html.replace(
+              "boards OTA-update over the air; this page updates by reloading after a release.",
+              "boards OTA-update over the air; this WebPort rebuilds from the main firmware source."
+          )
+          page.write_text(html)
+          PYCODE
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add garden.js garden.wasm index.html
+          if ! git diff --cached --quiet; then
+            git commit -m "WebPort: build from firmware ${GITHUB_SHA::7}"
+            git push origin HEAD:gh-pages
+          fi
 
   release:
     needs: build

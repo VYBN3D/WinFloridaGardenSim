@@ -219,6 +219,7 @@ bool otaBusy = false;                  // install running: button disabled
 // Cheat console (Options > CHEATS): type a code, tap ACTIVATE.
 char cheatEdit[16] = "";
 char cheatFeedback[28] = "";
+uint8_t cheatsTapCount = 0;  // seven deliberate taps unlock the cheat console
 char growerName[12] = "Conor";
 char growerNameEdit[12] = "";
 uint8_t farmerCharacter = 0;
@@ -397,9 +398,9 @@ void drawGardenActions();
 void waitForCutsceneContinue();
 
 // Firmware identity, shown in the boot log and on the Options page.
-#define FW_VERSION "v42"
+#define FW_VERSION "v43"
 #define FW_BOARD    "S28"
-#define FW_DATE    "Nov 20"
+#define FW_DATE    "Nov 28"
 #define FW_VERSION_FULL FW_VERSION "-" FW_BOARD
 
 // --- 8-bit soundtrack -------------------------------------------------------
@@ -1198,6 +1199,11 @@ const char *farmerCharacterName(uint8_t character) {
   if (character == 6) return "Sergio";
   if (character == 7) return "Vicente";
   if (character == 9) return "Benji";
+  if (character == 10) return "Bruce";
+  if (character == 11) return "Felix";
+  if (character == 12) return "Sammie";
+  if (character == 13) return "Bradley";
+  if (character == 14) return "Ashley";
   return "Conor";
 }
 
@@ -1388,7 +1394,7 @@ void loadGame() {
   plantVariant = preferences.getUShort("plantVar", 1);
   firstPlantingDone = preferences.getBool("plantDone", true);
   farmerCharacter = preferences.getUChar("farmer", 0);
-  if (farmerCharacter > 9) farmerCharacter = 0;
+  if (farmerCharacter > 14) farmerCharacter = 0;
   farmerCharacterChosen = preferences.getBool("farmerChosen", firstPlantingDone);
   plantedPotMask = preferences.getUChar("plantMask", firstPlantingDone ? 0x0F : 0);
   uint8_t afterPlant = preferences.getUChar("afterPlant", (uint8_t)GARDEN);
@@ -1746,7 +1752,126 @@ void drawButton(int x, int y, int w, int h, const char *label,
 }
 
 
+void drawNewGrowerHead(int cx, int cy, uint8_t character, float scale) {
+#define GP(v) ((int)((v) * scale))
+  const uint16_t skin = rgb565(230, 184, 143);
+  const uint16_t dark = rgb565(34, 29, 27);
+  const uint16_t smile = rgb565(112, 54, 48);
+  const uint16_t tooth = rgb565(255, 244, 224);
+  uint16_t hair = rgb565(43, 31, 27);
+  if (character == 11) hair = rgb565(20, 21, 24); // Felix: close-fitting black dental skull cap
+  if (character == 12) hair = rgb565(126, 57, 43);
+  if (character == 13) hair = rgb565(91, 58, 35);
+  if (character == 14) hair = rgb565(45, 29, 24);
+
+  // Same compact head footprint as the original cast. Face is drawn over
+  // the hair silhouette so the features read as a face at selector scale.
+  if (character == 12 || character == 14) {
+    game.fillRoundRect(cx + GP(-14), cy + GP(-15), GP(28), GP(34), GP(9), hair);
+    game.fillCircle(cx, cy, GP(10), skin);
+    game.fillRoundRect(cx + GP(-12), cy + GP(-15), GP(24), GP(9), GP(6), hair);
+    game.fillRoundRect(cx + GP(-15), cy + GP(-5), GP(5), GP(25), GP(2), hair);
+    game.fillRoundRect(cx + GP(10), cy + GP(-5), GP(5), GP(25), GP(2), hair);
+  } else {
+    game.fillRoundRect(cx + GP(-13), cy + GP(-14), GP(26), GP(15), GP(7), hair);
+    if (character == 10) {
+      // Bruce: long hair tied into a ponytail, falling behind his right shoulder.
+      game.fillRoundRect(cx + GP(8), cy + GP(-1), GP(8), GP(29), GP(4), hair);
+      game.fillRoundRect(cx + GP(9), cy + GP(3), GP(2), GP(20), GP(1), rgb565(70, 49, 39));
+      game.fillRoundRect(cx + GP(7), cy + GP(-2), GP(9), GP(4), GP(2), rgb565(91, 65, 48));
+    }
+    game.fillCircle(cx, cy, GP(10), skin);
+    game.fillRoundRect(cx + GP(-11), cy + GP(-14), GP(22), GP(8), GP(5), hair);
+    game.fillRect(cx + GP(-13), cy + GP(-7), GP(4), GP(8), hair);
+    game.fillRect(cx + GP(9), cy + GP(-7), GP(4), GP(8), hair);
+  }
+  if (character == 11) {
+    // Small, snug dentist-style skull cap: rounded crown with a narrow folded edge.
+    game.fillRoundRect(cx + GP(-12), cy + GP(-17), GP(24), GP(10), GP(5), rgb565(20, 21, 24));
+    game.drawFastHLine(cx + GP(-10), cy + GP(-8), GP(20), rgb565(75, 77, 82));
+    game.drawLine(cx + GP(-6), cy + GP(-14), cx + GP(0), cy + GP(-16), rgb565(48, 50, 55));
+    game.drawLine(cx + GP(0), cy + GP(-16), cx + GP(6), cy + GP(-14), rgb565(48, 50, 55));
+  }
+
+  // Ears, natural eye shapes, a small nose and an actual smile line give
+  // each face readable anatomy rather than floating marks.
+  game.fillCircle(cx + GP(-10), cy + GP(1), GP(2), skin);
+  game.fillCircle(cx + GP(10), cy + GP(1), GP(2), skin);
+  game.drawFastHLine(cx + GP(-7), cy + GP(-5), GP(5), dark);
+  game.drawFastHLine(cx + GP(2), cy + GP(-5), GP(5), dark);
+  game.drawPixel(cx + GP(-5), cy + GP(-2), dark);
+  game.drawPixel(cx + GP(4), cy + GP(-2), dark);
+  game.drawFastVLine(cx, cy + GP(-1), GP(4), rgb565(190, 133, 104));
+
+  if (character == 10) { // Bruce: defined short cut, strong but relaxed features
+    game.fillRoundRect(cx + GP(-13), cy + GP(-15), GP(26), GP(7), GP(4), hair);
+    game.drawFastHLine(cx + GP(-7), cy + GP(-7), GP(5), rgb565(62, 43, 34));
+    game.drawFastHLine(cx + GP(2), cy + GP(-7), GP(5), rgb565(62, 43, 34));
+    game.drawFastHLine(cx + GP(-4), cy + GP(6), GP(8), smile);
+    game.drawPixel(cx + GP(-5), cy + GP(5), smile);
+    game.drawPixel(cx + GP(4), cy + GP(5), smile);
+    // subtle jaw stubble, not a heavy moustache or mask
+    for (int x=-6; x<=6; x+=3) game.drawPixel(cx + GP(x), cy + GP(9), rgb565(112, 91, 78));
+    game.drawFastHLine(cx + GP(-12), cy + GP(5), GP(2), rgb565(112, 91, 78));
+    game.drawFastHLine(cx + GP(10), cy + GP(5), GP(2), rgb565(112, 91, 78));
+  } else if (character == 11 || character == 13) {
+    // Big, happy toothy grin. The curved lower edge is a smile, not an open mouth.
+    game.drawFastHLine(cx + GP(-7), cy + GP(-7), GP(5), rgb565(76, 53, 39));
+    game.drawFastHLine(cx + GP(2), cy + GP(-7), GP(5), rgb565(76, 53, 39));
+    game.drawFastHLine(cx + GP(-6), cy + GP(3), GP(2), smile);
+    game.drawFastHLine(cx + GP(-4), cy + GP(5), GP(8), smile);
+    game.drawFastHLine(cx + GP(4), cy + GP(3), GP(2), smile);
+    game.drawFastHLine(cx + GP(-4), cy + GP(4), GP(8), tooth);
+    game.drawPixel(cx + GP(-5), cy + GP(3), smile);
+    game.drawPixel(cx + GP(4), cy + GP(3), smile);
+    if (character == 13) {
+      // Bradley's brows are level and relaxed, avoiding a worried expression.
+      game.drawFastHLine(cx + GP(-7), cy + GP(-9), GP(5), rgb565(76, 53, 39));
+      game.drawFastHLine(cx + GP(2), cy + GP(-9), GP(5), rgb565(76, 53, 39));
+    }
+  } else if (character == 12) { // Sammie: clear frames and friendly smile
+    uint16_t frame = rgb565(190, 211, 210);
+    game.drawRoundRect(cx + GP(-10), cy + GP(-6), GP(9), GP(8), GP(2), frame);
+    game.drawRoundRect(cx + GP(1), cy + GP(-6), GP(9), GP(8), GP(2), frame);
+    game.drawFastHLine(cx + GP(-1), cy + GP(-4), GP(2), frame);
+    game.drawFastHLine(cx + GP(-14), cy + GP(-4), GP(4), frame);
+    game.drawFastHLine(cx + GP(10), cy + GP(-4), GP(4), frame);
+    game.drawFastHLine(cx + GP(-4), cy + GP(6), GP(8), smile);
+    game.drawPixel(cx + GP(-5), cy + GP(5), smile);
+    game.drawPixel(cx + GP(4), cy + GP(5), smile);
+    game.drawFastHLine(cx + GP(-6), cy + GP(-8), GP(4), rgb565(92, 54, 43));
+    game.drawFastHLine(cx + GP(2), cy + GP(-8), GP(4), rgb565(92, 54, 43));
+  } else if (character == 14) { // Ashley: long dark hair, Ray-Ban wayfarers, smile
+    uint16_t frame = rgb565(24, 25, 27);
+    game.fillRoundRect(cx + GP(-10), cy + GP(-6), GP(9), GP(8), GP(1), frame);
+    game.fillRoundRect(cx + GP(1), cy + GP(-6), GP(9), GP(8), GP(1), frame);
+    game.drawFastHLine(cx + GP(-1), cy + GP(-4), GP(2), frame);
+    game.drawFastHLine(cx + GP(-14), cy + GP(-5), GP(4), frame);
+    game.drawFastHLine(cx + GP(10), cy + GP(-5), GP(4), frame);
+    game.drawLine(cx + GP(-8), cy + GP(-3), cx + GP(-5), cy + GP(-1), rgb565(75, 91, 100));
+    game.drawFastHLine(cx + GP(-5), cy + GP(6), GP(10), smile);
+    game.drawPixel(cx + GP(-6), cy + GP(5), smile);
+    game.drawPixel(cx + GP(5), cy + GP(5), smile);
+    game.drawFastVLine(cx + GP(-12), cy + GP(1), GP(15), rgb565(73, 47, 35));
+    game.drawFastVLine(cx + GP(12), cy + GP(1), GP(15), rgb565(73, 47, 35));
+  }
+
+  // Signature dark Ray-Ban-style grow glasses for the full cast.
+  // Sergio (6) and Sammie (12) keep their clear prescription-style frames.
+  if (character == 10 || character == 11 || character == 13) {
+    uint16_t frame = rgb565(24, 25, 27);
+    game.fillRoundRect(cx + GP(-10), cy + GP(-6), GP(9), GP(8), GP(1), frame);
+    game.fillRoundRect(cx + GP(1), cy + GP(-6), GP(9), GP(8), GP(1), frame);
+    game.drawFastHLine(cx + GP(-1), cy + GP(-4), GP(2), frame);
+    game.drawFastHLine(cx + GP(-14), cy + GP(-5), GP(4), frame);
+    game.drawFastHLine(cx + GP(10), cy + GP(-5), GP(4), frame);
+    game.drawLine(cx + GP(-8), cy + GP(-3), cx + GP(-5), cy + GP(-1), rgb565(75, 91, 100));
+  }
+#undef GP
+}
+
 void drawFarmerHeadLarge(int cx, int cy, uint8_t character) {
+  if (character >= 10 && character <= 14) { drawNewGrowerHead(cx, cy, character, 1.0f); return; }
   uint16_t hair = character == 3 ? rgb565(210, 176, 104) : rgb565(35, 27, 26);
   uint16_t skin = character == 2 ? rgb565(133, 84, 61)
                 : character == 6 ? rgb565(172, 112, 78)
@@ -1967,6 +2092,11 @@ void drawCharacterMini(int cx, int top, uint8_t character) {
                 : character == 7 ? rgb565(58, 38, 26)
                 : character == 1 ? rgb565(96, 64, 40)
                 : character == 9 ? rgb565(146, 114, 70)
+                : character == 10 ? rgb565(48, 32, 25)
+                : character == 11 ? rgb565(112, 76, 48)
+                : character == 12 ? rgb565(126, 57, 43)
+                : character == 13 ? rgb565(91, 58, 35)
+                : character == 14 ? rgb565(45, 29, 24)
                 : rgb565(35, 27, 26);
   uint16_t skin = character == 2 ? rgb565(133, 84, 61)
                 : character == 6 ? rgb565(172, 112, 78)
@@ -1976,6 +2106,29 @@ void drawCharacterMini(int cx, int top, uint8_t character) {
   int faceY = top + 8;
   game.fillRoundRect(cx - 9, top, 18, character == 6 ? 10 : 15, 7, hair);
   game.fillCircle(cx, faceY, 6, skin);
+  if (character >= 10 && character <= 14) {
+    if (character == 12 || character == 14) {
+      game.fillRoundRect(cx - 10, top - 1, 20, 7, 4, hair);
+      game.drawFastVLine(cx - 8, top + 5, 11, hair);
+      game.drawFastVLine(cx + 7, top + 5, 11, hair);
+    } else {
+      game.fillRoundRect(cx - 8, top, 16, 6, 4, hair);
+    }
+    if (character == 12) {
+      uint16_t clearFrame = rgb565(190, 211, 210);
+      game.drawRoundRect(cx - 6, faceY - 2, 5, 4, 1, clearFrame);
+      game.drawRoundRect(cx + 1, faceY - 2, 5, 4, 1, clearFrame);
+      game.drawFastHLine(cx - 1, faceY, 2, clearFrame);
+    } else {
+      game.drawFastHLine(cx - 2, faceY - 2, 4, rgb565(42, 31, 26));
+    }
+    if (character == 11 || character == 13) {
+      game.fillRoundRect(cx - 4, faceY + 2, 8, 4, 1, rgb565(116, 54, 48));
+      game.drawFastHLine(cx - 3, faceY + 2, 6, TFT_WHITE);
+    } else {
+      game.drawFastHLine(cx - 3, faceY + 3, 6, rgb565(116, 54, 48));
+    }
+  }
   if (character == 6) {
     game.drawFastHLine(cx - 2, faceY + 3, 5, rgb565(52, 37, 33));   // short goatee
     game.fillRect(cx - 1, faceY + 4, 2, 2, rgb565(52, 37, 33));
@@ -1997,9 +2150,17 @@ void drawCharacterMini(int cx, int top, uint8_t character) {
     game.drawFastVLine(cx + 7, top + 6, 8, hair);
     game.drawFastHLine(cx - 3, faceY + 2, 6, rgb565(110, 74, 48));  // mustache
   }
-  game.fillRoundRect(cx - 6, faceY - 2, 5, 4, 1, black);   // dark grow glasses
-  game.fillRoundRect(cx + 1, faceY - 2, 5, 4, 1, black);
-  game.drawFastHLine(cx - 1, faceY, 2, black);
+  if ((character < 10 && character != 6) ||
+      (character >= 10 && character != 12)) {
+    game.fillRoundRect(cx - 6, faceY - 2, 5, 4, 1, black);   // dark Ray-Ban-style frames
+    game.fillRoundRect(cx + 1, faceY - 2, 5, 4, 1, black);
+    game.drawFastHLine(cx - 1, faceY, 2, black);
+  } else if (character == 6 || character == 12) {
+    uint16_t clearFrame = rgb565(190, 211, 220);
+    game.drawRoundRect(cx - 6, faceY - 2, 5, 4, 1, clearFrame);
+    game.drawRoundRect(cx + 1, faceY - 2, 5, 4, 1, clearFrame);
+    game.drawFastHLine(cx - 1, faceY, 2, clearFrame);
+  }
   if (character == 0) game.drawFastHLine(cx - 3, faceY + 3, 6, rgb565(52, 37, 33));
   if (character == 8) {
     game.drawFastHLine(cx - 4, faceY + 3, 9, rgb565(62, 52, 47));   // full beard
@@ -3746,7 +3907,15 @@ void drawOptionsPage() {
                   gameSpeed == 0 ? "RELAXED" : gameSpeed == 1 ? "QUICK" : "EXTREME", PANEL);
   drawOptionsCard(163, 72, 152, 36, "MUSIC", volLabel, PANEL);
   drawOptionsCard(5, 112, 152, 36, "FAST HARVEST", "TAP", ACCENT_DARK);
-  drawOptionsCard(163, 112, 152, 36, "CHEATS", "TAP", PANEL_LIGHT);
+  // CHEATS stays muted until the seventh tap; no visible progress counter.
+  if (cheatsTapCount >= 7) {
+    drawOptionsCard(163, 112, 152, 36, "CHEATS", "", ACCENT_DARK);
+  } else {
+    game.fillRoundRect(163, 112, 152, 36, 8, PANEL_LIGHT);
+    game.drawRoundRect(163, 112, 152, 36, 8, TEXT_DIM);
+    game.setTextColor(TEXT_DIM, PANEL_LIGHT);
+    game.drawCentreString("CHEATS", 239, 116, 2);
+  }
   // Bottom row: two big card buttons side by side (the whole card is the
   // tap target). Must stay above the nav bar (NAV_Y = 207) or the nav touch
   // handler steals the taps (that was the STASH-jump bug).
@@ -3802,7 +3971,7 @@ void drawCharacterSelectPage() {
     game.drawLine(286, 6, 294, 14, RED);
     game.drawLine(294, 6, 286, 14, RED);
   }
-  uint8_t c = characterSelectIndex % 10;
+  uint8_t c = characterSelectIndex % 15;
   game.fillRoundRect(58, 30, 204, 160, 10, PANEL);
   game.drawRoundRect(58, 30, 204, 160, 10, ACCENT_DARK);
   drawFarmerHeadLarge(160, 90, c);
@@ -5135,6 +5304,7 @@ void drawSmokeCutsceneFrame(int frame) {
 
 // Scaled copy of drawFarmerHeadLarge for the intro close-up (scale 1 = normal).
 void drawFarmerHeadScaled(int cx, int cy, uint8_t character, float s) {
+  if (character >= 10 && character <= 14) { drawNewGrowerHead(cx, cy, character, s); return; }
 #define SP(v) ((int)((v) * (s)))
   uint16_t hair = character == 3 ? rgb565(210, 176, 104) : rgb565(35, 27, 26);
   uint16_t skin = character == 2 ? rgb565(133, 84, 61)
@@ -6186,7 +6356,7 @@ void chooseFarmerCharacter(uint8_t character) {
   bool firstTimeSetup = !farmerCharacterChosen && !selectingFarmerFromOptions;
   const char *oldCharacterName = farmerCharacterName(farmerCharacter);
   bool growerNameIsDefault = strcmp(growerName, oldCharacterName) == 0;
-  farmerCharacter = min((int)character, 9);
+  farmerCharacter = min((int)character, 14);
   farmerCharacterChosen = true;
   if (growerNameIsDefault || !growerName[0]) {
     strlcpy(growerName, farmerCharacterName(farmerCharacter), sizeof(growerName));
@@ -6234,12 +6404,12 @@ void handleTouch(int x, int y) {
       return;
     }
     if (y >= 88 && y < 138 && x < 54) {
-      characterSelectIndex = (characterSelectIndex + 9) % 10;  // wrap: 10 growers
+      characterSelectIndex = (characterSelectIndex + 14) % 15;  // wrap: 15 growers
       render();
       return;
     }
     if (y >= 88 && y < 138 && x >= 266) {
-      characterSelectIndex = (characterSelectIndex + 1) % 10;
+      characterSelectIndex = (characterSelectIndex + 1) % 15;
       render();
       return;
     }
@@ -6392,9 +6562,14 @@ void handleTouch(int x, int y) {
       } else if (y >= 112 && y < 148 && x < 160) {
         prepareDemoHarvest();
       } else if (y >= 112 && y < 148) {
-        page = CHEAT_CODE;               // cheat console
-        cheatEdit[0] = '\0';
-        cheatFeedback[0] = '\0';
+        if (cheatsTapCount < 7) ++cheatsTapCount;
+        if (cheatsTapCount >= 7) {
+          page = CHEAT_CODE;             // unlock on the seventh deliberate tap
+          cheatEdit[0] = '\0';
+          cheatFeedback[0] = '\0';
+          render();
+          return;
+        }
         render();
         return;
       } else if (y >= 154 && y < 202) {

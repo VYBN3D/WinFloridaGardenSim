@@ -5,6 +5,13 @@ Each tagged version publishes `.bin` files + `version.txt` on the
 [Releases page](https://github.com/VYBN3D/WinFloridaGardenSim/releases);
 boards update over the air via **Options → CHECK UPDATES → INSTALL**.
 
+## v43 — Five new growers, unified firmware/WebPort source
+- Added Bruce, Felix, Sammie, Bradley, and Ashley to the original S3 and S28 firmware character system
+- Expanded character selection and persistent save validation from 10 to 15 growers
+- Added matching full-size faces, small portraits, and intro portraits, including Felix's black dental skull cap
+- Kept the seven-tap hidden CHEATS unlock consistent across both boards and the WebPort
+- WebPort is now built from the canonical S3 firmware source; only the browser hardware shim and Supabase page integration remain WebPort-specific
+
 ## v42 — Reference-style colas, harvest fix, sleep audio fix
 - Mature plants redesigned around the Weed Farmer reference: a fat spear
   main cola (4 stacked buds) runs up the stem tip, every branch offshoot
